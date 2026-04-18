@@ -29,6 +29,7 @@
 #include "copy/reader.h"
 #include "driver/common/utils.h"
 #include "postgres_type.h"
+#include "stage_writer.h"
 
 #define ADBC_HOLOGRES_OPTION_BATCH_SIZE_HINT_BYTES \
   "adbc.hologres.batch_size_hint_bytes"
@@ -43,13 +44,6 @@ namespace adbchg {
 class HologresConnection;
 
 constexpr static int64_t kDefaultBatchSizeHintBytes = 16777216;
-
-/// ON_CONFLICT behavior for Hologres COPY
-enum class OnConflictMode {
-  kNone,    // Default: error on conflict
-  kIgnore,  // Skip conflicting rows
-  kUpdate,  // Update conflicting rows
-};
 
 /// Ingest method for Hologres bulk ingestion
 enum class HologresIngestMethod {
@@ -153,9 +147,12 @@ class HologresStatement {
                                  const struct ArrowSchema& source_schema,
                                  std::string* escaped_table,
                                  std::string* escaped_field_list,
+                                 std::string* escaped_type_list,
                                  struct AdbcError* error);
   AdbcStatusCode ExecuteIngest(struct ArrowArrayStream* stream, int64_t* rows_affected,
                                struct AdbcError* error);
+  AdbcStatusCode ExecuteIngestStage(struct ArrowArrayStream* stream,
+                                    int64_t* rows_affected, struct AdbcError* error);
   AdbcStatusCode ExecuteBind(struct ArrowArrayStream* stream, int64_t* rows_affected,
                              struct AdbcError* error);
 

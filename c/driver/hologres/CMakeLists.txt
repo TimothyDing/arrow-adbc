@@ -34,6 +34,8 @@ add_arrow_lib(adbc_driver_hologres
               hologres.cc
               result_helper.cc
               result_reader.cc
+              stage_connection.cc
+              stage_writer.cc
               statement.cc
               OUTPUTS
               ADBC_LIBRARIES

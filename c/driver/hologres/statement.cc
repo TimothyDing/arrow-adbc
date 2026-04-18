@@ -43,6 +43,7 @@
 
 #include "bind_stream.h"
 #include "connection.h"
+#include "database.h"
 #include "driver/common/options.h"
 #include "driver/common/utils.h"
 #include "driver/framework/utility.h"
@@ -51,6 +52,8 @@
 #include "postgres_util.h"
 #include "result_helper.h"
 #include "result_reader.h"
+#include "stage_connection.h"
+#include "stage_writer.h"
 
 namespace adbchg {
 
@@ -350,7 +353,7 @@ AdbcStatusCode HologresStatement::Cancel(struct AdbcError* error) {
 AdbcStatusCode HologresStatement::CreateBulkTable(
     const std::string& current_schema, const struct ArrowSchema& source_schema,
     std::string* escaped_table, std::string* escaped_field_list,
-    struct AdbcError* error) {
+    std::string* escaped_type_list, struct AdbcError* error) {
   PGconn* conn = connection_->conn();
 
   if (!ingest_.db_schema.empty() && ingest_.temporary) {
@@ -436,6 +439,7 @@ AdbcStatusCode HologresStatement::CreateBulkTable(
     if (i > 0) {
       create += ", ";
       *escaped_field_list += ", ";
+      if (escaped_type_list) *escaped_type_list += ", ";
     }
 
     const char* unescaped = source_schema.children[i]->name;
@@ -457,7 +461,16 @@ AdbcStatusCode HologresStatement::CreateBulkTable(
         adbcpq::PostgresType::FromSchema(*type_resolver_, source_schema.children[i],
                                          &pg_type, &na_error),
         &na_error, error);
-    create += " " + pg_type.sql_type_name();
+    std::string type_name = pg_type.sql_type_name();
+    create += " " + type_name;
+
+    // Build type list for EXTERNAL_FILES AS clause: "col_name" type
+    if (escaped_type_list) {
+      char* escaped2 = PQescapeIdentifier(conn, unescaped, std::strlen(unescaped));
+      *escaped_type_list += escaped2;
+      PQfreemem(escaped2);
+      *escaped_type_list += " " + type_name;
+    }
   }
 
   if (ingest_.mode == IngestMode::kAppend) {
@@ -626,6 +639,11 @@ AdbcStatusCode HologresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
     return ADBC_STATUS_NOT_IMPLEMENTED;
   }
 
+  // Dispatch to Stage mode if configured
+  if (ingest_.hologres_ingest_method == HologresIngestMethod::kStage) {
+    return ExecuteIngestStage(stream, rows_affected, error);
+  }
+
   // Get current schema to avoid temp table shadowing
   std::string current_schema;
   {
@@ -651,6 +669,7 @@ AdbcStatusCode HologresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
     AdbcStatusCode status_code = CreateBulkTable(current_schema,
                                                  bind_stream.bind_schema.value,
                                                  &escaped_table, &escaped_field_list,
+                                                 /*escaped_type_list=*/nullptr,
                                                  &tmp_error);
     return adbc::driver::Status::FromAdbc(status_code, tmp_error);
   }));
@@ -692,6 +711,81 @@ AdbcStatusCode HologresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
   RAISE_STATUS(error, bind_stream.ExecuteCopy(connection_->conn(),
                                               *connection_->type_resolver(),
                                               rows_affected));
+  return ADBC_STATUS_OK;
+}
+
+AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* stream,
+                                                     int64_t* rows_affected,
+                                                     struct AdbcError* error) {
+  // Get current schema
+  std::string current_schema;
+  {
+    adbcpq::PqResultHelper result_helper{connection_->conn(), "SELECT CURRENT_SCHEMA()"};
+    RAISE_STATUS(error, result_helper.Execute());
+    auto it = result_helper.begin();
+    if (it == result_helper.end()) {
+      InternalAdbcSetError(
+          error,
+          "[hologres] PostgreSQL returned no rows for 'SELECT CURRENT_SCHEMA()'");
+      return ADBC_STATUS_INTERNAL;
+    }
+    current_schema = (*it)[0].data;
+  }
+
+  // Setup bind stream and create table
+  adbcpq::BindStream bind_stream;
+  bind_stream.SetBind(&bind_);
+  std::memset(&bind_, 0, sizeof(bind_));
+  std::string escaped_table;
+  std::string escaped_field_list;
+  std::string escaped_type_list;
+  RAISE_STATUS(error, bind_stream.Begin([&]() -> adbc::driver::Status {
+    struct AdbcError tmp_error = ADBC_ERROR_INIT;
+    AdbcStatusCode status_code =
+        CreateBulkTable(current_schema, bind_stream.bind_schema.value, &escaped_table,
+                        &escaped_field_list, &escaped_type_list, &tmp_error);
+    return adbc::driver::Status::FromAdbc(status_code, tmp_error);
+  }));
+
+  // Create stage configuration
+  HologresStageConfig config;
+  config.stage_name = HologresStageWriter::GenerateStageName();
+
+  // Create a dedicated FixedFE connection for COPY operations only.
+  // Hologres COPY EXTERNAL_FILES requires FixedFE connection (options=type=fixed)
+  // but CALL statements (HG_CREATE/DROP_INTERNAL_STAGE) require regular FE.
+  std::string fixed_uri = MakeFixedFeUri(connection_->database()->uri());
+  PGconn* fixed_conn = PQconnectdb(fixed_uri.c_str());
+  if (PQstatus(fixed_conn) != CONNECTION_OK) {
+    std::string conn_error = PQerrorMessage(fixed_conn);
+    PQfinish(fixed_conn);
+    InternalAdbcSetError(
+        error, "[hologres] Failed to create FixedFE connection for Stage: %s",
+        conn_error.c_str());
+    return ADBC_STATUS_IO;
+  }
+
+  // Ensure FixedFE connection is cleaned up on scope exit
+  auto fixed_conn_guard =
+      std::unique_ptr<PGconn, decltype(&PQfinish)>(fixed_conn, PQfinish);
+
+  // Create stage using main connection (CALL statements need regular FE)
+  auto main_stage_conn = StageConnection::CreateFromPGconn(connection_->conn());
+  HologresStageWriter main_writer(main_stage_conn.get(), config);
+  RAISE_STATUS(error, main_writer.CreateStage());
+
+  // Write to stage using FixedFE connection (COPY EXTERNAL_FILES needs FixedFE)
+  {
+    auto fixed_stage_conn = StageConnection::CreateFromPGconn(fixed_conn);
+    HologresStageWriter fixed_writer(fixed_stage_conn.get(), config);
+    RAISE_STATUS(error, fixed_writer.WriteToStage(&bind_stream.bind.value, rows_affected));
+  }
+
+  // Insert from stage using main connection
+  RAISE_STATUS(error, main_writer.InsertFromStage(escaped_table, escaped_field_list,
+                                                   escaped_type_list, ingest_.on_conflict));
+  RAISE_STATUS(error, main_writer.DropStage());
+
   return ADBC_STATUS_OK;
 }
 
