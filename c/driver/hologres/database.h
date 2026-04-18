@@ -17,23 +17,36 @@
 
 #pragma once
 
+#include <array>
+#include <cstdint>
+#include <memory>
 #include <string>
+#include <string_view>
 
 #include <arrow-adbc/adbc.h>
+#include <libpq-fe.h>
+
+#include "driver/framework/status.h"
+#include "postgres_type.h"
 
 namespace adbchg {
+using adbc::driver::Status;
 
-/// Hologres database (connection factory and configuration).
+/// Parse a version string with a given prefix (e.g., "Hologres 4.1.12" -> {4, 1, 12})
+std::array<int, 3> ParsePrefixedVersion(std::string_view version_info,
+                                        std::string_view prefix);
+
+/// Transform a PostgreSQL URI to include FixedFE options for Hologres Stage mode.
+std::string MakeFixedFeUri(const std::string& uri);
+
 class HologresDatabase {
  public:
-  HologresDatabase() = default;
-  ~HologresDatabase() = default;
+  HologresDatabase();
+  ~HologresDatabase();
 
-  // Lifecycle
+  // Public ADBC API
   AdbcStatusCode Init(struct AdbcError* error);
   AdbcStatusCode Release(struct AdbcError* error);
-
-  // Options
   AdbcStatusCode SetOption(const char* key, const char* value, struct AdbcError* error);
   AdbcStatusCode GetOption(const char* key, char* value, size_t* length,
                            struct AdbcError* error);
@@ -46,11 +59,29 @@ class HologresDatabase {
   AdbcStatusCode SetOptionInt(const char* key, int64_t value, struct AdbcError* error);
   AdbcStatusCode GetOptionInt(const char* key, int64_t* value, struct AdbcError* error);
 
-  /// Get the connection URI.
+  // Internal implementation
+  AdbcStatusCode Connect(PGconn** conn, struct AdbcError* error);
+  AdbcStatusCode Disconnect(PGconn** conn, struct AdbcError* error);
+  const std::shared_ptr<adbcpq::PostgresTypeResolver>& type_resolver() const {
+    return type_resolver_;
+  }
+
+  Status InitVersions(PGconn* conn);
+  Status RebuildTypeResolver(PGconn* conn);
+
+  std::string_view VendorName() const { return "Hologres"; }
+  const std::array<int, 3>& VendorVersion() const { return hologres_server_version_; }
+  const std::array<int, 3>& HologresVersion() const { return hologres_server_version_; }
+  const std::array<int, 3>& PostgresVersion() const { return postgres_server_version_; }
+
   const std::string& uri() const { return uri_; }
 
  private:
+  int32_t open_connections_;
   std::string uri_;
+  std::shared_ptr<adbcpq::PostgresTypeResolver> type_resolver_;
+  std::array<int, 3> postgres_server_version_{};
+  std::array<int, 3> hologres_server_version_{};
 };
 
 }  // namespace adbchg
