@@ -30,7 +30,10 @@ add_arrow_lib(adbc_driver_hologres
               SOURCES
               connection.cc
               database.cc
+              error.cc
               hologres.cc
+              result_helper.cc
+              result_reader.cc
               statement.cc
               OUTPUTS
               ADBC_LIBRARIES
