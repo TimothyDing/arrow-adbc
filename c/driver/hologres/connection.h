@@ -17,60 +17,76 @@
 
 #pragma once
 
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include <arrow-adbc/adbc.h>
+#include <libpq-fe.h>
+
+#include "postgres_type.h"
 
 namespace adbchg {
-
 class HologresDatabase;
 
-/// Hologres connection (session with the database).
 class HologresConnection {
  public:
-  HologresConnection() = default;
-  ~HologresConnection() = default;
+  HologresConnection()
+      : database_(nullptr), conn_(nullptr), cancel_(nullptr), autocommit_(true) {}
 
-  // Lifecycle
-  AdbcStatusCode Init(struct AdbcDatabase* database, struct AdbcError* error);
-  AdbcStatusCode Release(struct AdbcError* error);
-
-  // Transaction (Hologres does not support transactions)
+  AdbcStatusCode Cancel(struct AdbcError* error);
   AdbcStatusCode Commit(struct AdbcError* error);
-  AdbcStatusCode Rollback(struct AdbcError* error);
-
-  // Metadata
   AdbcStatusCode GetInfo(struct AdbcConnection* connection, const uint32_t* info_codes,
-                         size_t info_codes_length, struct ArrowArrayStream* stream,
+                         size_t info_codes_length, struct ArrowArrayStream* out,
                          struct AdbcError* error);
   AdbcStatusCode GetObjects(struct AdbcConnection* connection, int depth,
                             const char* catalog, const char* db_schema,
                             const char* table_name, const char** table_types,
-                            const char* column_name, struct ArrowArrayStream* stream,
+                            const char* column_name, struct ArrowArrayStream* out,
                             struct AdbcError* error);
-  AdbcStatusCode GetTableSchema(const char* catalog, const char* db_schema,
-                                const char* table_name, struct ArrowSchema* schema,
-                                struct AdbcError* error);
-  AdbcStatusCode GetTableTypes(struct AdbcConnection* connection,
-                               struct ArrowArrayStream* stream, struct AdbcError* error);
-  AdbcStatusCode Cancel(struct AdbcError* error);
-
-  // Options
-  AdbcStatusCode SetOption(const char* key, const char* value, struct AdbcError* error);
-  AdbcStatusCode GetOption(const char* key, char* value, size_t* length,
+  AdbcStatusCode GetOption(const char* option, char* value, size_t* length,
                            struct AdbcError* error);
-  AdbcStatusCode SetOptionBytes(const char* key, const uint8_t* value, size_t length,
+  AdbcStatusCode GetOptionBytes(const char* option, uint8_t* value, size_t* length,
                                 struct AdbcError* error);
-  AdbcStatusCode GetOptionBytes(const char* key, uint8_t* value, size_t* length,
-                                struct AdbcError* error);
-  AdbcStatusCode SetOptionDouble(const char* key, double value, struct AdbcError* error);
-  AdbcStatusCode GetOptionDouble(const char* key, double* value, struct AdbcError* error);
-  AdbcStatusCode SetOptionInt(const char* key, int64_t value, struct AdbcError* error);
-  AdbcStatusCode GetOptionInt(const char* key, int64_t* value, struct AdbcError* error);
-
-  // Statistics
+  AdbcStatusCode GetOptionDouble(const char* option, double* value,
+                                 struct AdbcError* error);
+  AdbcStatusCode GetOptionInt(const char* option, int64_t* value,
+                              struct AdbcError* error);
   AdbcStatusCode GetStatistics(const char* catalog, const char* db_schema,
                                const char* table_name, bool approximate,
                                struct ArrowArrayStream* out, struct AdbcError* error);
   AdbcStatusCode GetStatisticNames(struct ArrowArrayStream* out, struct AdbcError* error);
+  AdbcStatusCode GetTableSchema(const char* catalog, const char* db_schema,
+                                const char* table_name, struct ArrowSchema* schema,
+                                struct AdbcError* error);
+  AdbcStatusCode GetTableTypes(struct AdbcConnection* connection,
+                               struct ArrowArrayStream* out, struct AdbcError* error);
+  AdbcStatusCode Init(struct AdbcDatabase* database, struct AdbcError* error);
+  AdbcStatusCode Release(struct AdbcError* error);
+  AdbcStatusCode Rollback(struct AdbcError* error);
+  AdbcStatusCode SetOption(const char* key, const char* value, struct AdbcError* error);
+  AdbcStatusCode SetOptionBytes(const char* key, const uint8_t* value, size_t length,
+                                struct AdbcError* error);
+  AdbcStatusCode SetOptionDouble(const char* key, double value, struct AdbcError* error);
+  AdbcStatusCode SetOptionInt(const char* key, int64_t value, struct AdbcError* error);
+
+  PGconn* conn() const { return conn_; }
+  const std::shared_ptr<adbcpq::PostgresTypeResolver>& type_resolver() const {
+    return type_resolver_;
+  }
+  bool autocommit() const { return autocommit_; }
+
+  const std::shared_ptr<HologresDatabase>& database() const { return database_; }
+
+ private:
+  std::shared_ptr<HologresDatabase> database_;
+  std::shared_ptr<adbcpq::PostgresTypeResolver> type_resolver_;
+  PGconn* conn_;
+  PGcancel* cancel_;
+  bool autocommit_;
 };
 
 }  // namespace adbchg
