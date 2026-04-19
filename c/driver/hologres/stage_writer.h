@@ -96,7 +96,8 @@ class HologresStageWriter {
   Status InsertFromStage(const std::string& target_table,
                          const std::string& escaped_field_list,
                          const std::string& escaped_type_list,
-                         OnConflictMode on_conflict);
+                         OnConflictMode on_conflict,
+                         const std::string& pk_columns = "");
   Status DropStage();
 
   const std::string& stage_name() const { return config_.stage_name; }

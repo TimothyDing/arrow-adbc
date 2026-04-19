@@ -768,16 +768,32 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
 Status HologresStageWriter::InsertFromStage(const std::string& target_table,
                                             const std::string& escaped_field_list,
                                             const std::string& escaped_type_list,
-                                            OnConflictMode on_conflict) {
+                                            OnConflictMode on_conflict,
+                                            const std::string& pk_columns) {
   std::string sql = fmt::format(
       "INSERT INTO {} ({}) SELECT * FROM EXTERNAL_FILES("
       "path='internal_stage://{}') AS ({})",
       target_table, escaped_field_list, config_.stage_name, escaped_type_list);
 
-  if (on_conflict != OnConflictMode::kNone) {
-    if (on_conflict == OnConflictMode::kIgnore) {
-      sql += " ON CONFLICT DO NOTHING";
+  if (on_conflict == OnConflictMode::kIgnore) {
+    sql += " ON CONFLICT DO NOTHING";
+  } else if (on_conflict == OnConflictMode::kUpdate) {
+    // ON CONFLICT (pk_cols) DO UPDATE SET col=EXCLUDED.col, ...
+    sql += " ON CONFLICT (" + pk_columns + ") DO UPDATE SET ";
+    std::string set_clause;
+    size_t pos = 0;
+    while (pos < escaped_field_list.size()) {
+      size_t quote_start = escaped_field_list.find('"', pos);
+      if (quote_start == std::string::npos) break;
+      size_t quote_end = escaped_field_list.find('"', quote_start + 1);
+      if (quote_end == std::string::npos) break;
+      std::string col =
+          escaped_field_list.substr(quote_start, quote_end - quote_start + 1);
+      if (!set_clause.empty()) set_clause += ", ";
+      set_clause += col + "=EXCLUDED." + col;
+      pos = quote_end + 1;
     }
+    sql += set_clause;
   }
 
   return conn_->ExecuteCommand(sql);

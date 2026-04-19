@@ -781,9 +781,44 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
     RAISE_STATUS(error, fixed_writer.WriteToStage(&bind_stream.bind.value, rows_affected));
   }
 
+  // Query primary key columns if ON_CONFLICT UPDATE is requested
+  std::string pk_columns;
+  if (ingest_.on_conflict == OnConflictMode::kUpdate) {
+    // Use schema-qualified lookup with pg_class + pg_namespace
+    std::string pk_query = fmt::format(
+        "SELECT a.attname FROM pg_index i "
+        "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+        "AND a.attnum = ANY(i.indkey) "
+        "JOIN pg_class c ON c.oid = i.indrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = '{}' AND c.relname = '{}' AND i.indisprimary "
+        "ORDER BY array_position(i.indkey, a.attnum)",
+        current_schema, ingest_.target);
+    PGresult* pk_result = PQexec(connection_->conn(), pk_query.c_str());
+    if (PQresultStatus(pk_result) == PGRES_TUPLES_OK) {
+      for (int r = 0; r < PQntuples(pk_result); r++) {
+        if (r > 0) pk_columns += ", ";
+        char* escaped = PQescapeIdentifier(connection_->conn(),
+                                           PQgetvalue(pk_result, r, 0),
+                                           strlen(PQgetvalue(pk_result, r, 0)));
+        pk_columns += escaped;
+        PQfreemem(escaped);
+      }
+    }
+    PQclear(pk_result);
+    if (pk_columns.empty()) {
+      InternalAdbcSetError(
+          error,
+          "[hologres] ON_CONFLICT UPDATE in Stage mode requires a primary key");
+      main_writer.DropStage();
+      return ADBC_STATUS_INVALID_ARGUMENT;
+    }
+  }
+
   // Insert from stage using main connection
   RAISE_STATUS(error, main_writer.InsertFromStage(escaped_table, escaped_field_list,
-                                                   escaped_type_list, ingest_.on_conflict));
+                                                   escaped_type_list, ingest_.on_conflict,
+                                                   pk_columns));
   RAISE_STATUS(error, main_writer.DropStage());
 
   return ADBC_STATUS_OK;
