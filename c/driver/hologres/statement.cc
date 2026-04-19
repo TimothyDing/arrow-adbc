@@ -698,6 +698,46 @@ AdbcStatusCode HologresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
 
   query += ")";
 
+  // Resolve target table column types for proper COPY writer selection
+  // (e.g., JSONB columns need a version byte prefix).
+  // Must be done BEFORE entering COPY mode.
+  std::vector<adbcpq::PostgresType> pg_types;
+  {
+    std::string type_query =
+        "SELECT atttypid FROM pg_catalog.pg_class AS cls "
+        "INNER JOIN pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid "
+        "WHERE attr.attnum >= 0 AND cls.oid = '";
+    type_query += escaped_table;
+    type_query += "'::regclass::oid ORDER BY attr.attnum";
+
+    adbcpq::PqResultHelper type_helper{connection_->conn(), type_query};
+    RAISE_STATUS(error, type_helper.Execute());
+
+    for (auto row : type_helper) {
+      Oid pg_oid = static_cast<uint32_t>(std::strtol(row[0].data, nullptr, 10));
+      adbcpq::PostgresType pg_type;
+      if (type_resolver_->FindWithDefault(pg_oid, &pg_type) == NANOARROW_OK) {
+        pg_types.push_back(pg_type);
+      } else {
+        // Fallback: resolve from Arrow schema
+        int64_t idx = static_cast<int64_t>(pg_types.size());
+        if (idx < bind_stream.bind_schema->n_children) {
+          adbcpq::PostgresType fallback_type;
+          struct ArrowError na_err;
+          if (adbcpq::PostgresType::FromSchema(*type_resolver_,
+                                               bind_stream.bind_schema->children[idx],
+                                               &fallback_type, &na_err) == NANOARROW_OK) {
+            pg_types.push_back(fallback_type);
+          } else {
+            pg_types.push_back(adbcpq::PostgresType());
+          }
+        } else {
+          pg_types.push_back(adbcpq::PostgresType());
+        }
+      }
+    }
+  }
+
   PGresult* result = PQexec(connection_->conn(), query.c_str());
   if (PQresultStatus(result) != PGRES_COPY_IN) {
     AdbcStatusCode code = adbcpq::SetError(
@@ -710,7 +750,7 @@ AdbcStatusCode HologresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
   PQclear(result);
   RAISE_STATUS(error, bind_stream.ExecuteCopy(connection_->conn(),
                                               *connection_->type_resolver(),
-                                              rows_affected));
+                                              pg_types, rows_affected));
   return ADBC_STATUS_OK;
 }
 

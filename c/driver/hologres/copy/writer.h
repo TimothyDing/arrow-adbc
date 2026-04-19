@@ -604,6 +604,24 @@ class PostgresCopyBinaryFieldWriter : public PostgresCopyFieldWriter {
   }
 };
 
+/// Writes a JSONB value in PostgreSQL binary COPY format: a 1-byte version
+/// number (0x01) followed by the JSON string content.
+/// See: https://github.com/postgres/postgres/blob/3f44959f47460fb350d25d760cf2384f9aa14e9a/src/backend/utils/adt/jsonb.c#L80-L87
+class PostgresCopyJsonbFieldWriter : public PostgresCopyFieldWriter {
+ public:
+  ArrowErrorCode Write(ArrowBuffer* buffer, int64_t index, ArrowError* error) override {
+    struct ArrowBufferView buffer_view = ArrowArrayViewGetBytesUnsafe(array_view_, index);
+    // JSONB binary format: 1-byte version (0x01) + JSON string
+    int32_t field_size_bytes = static_cast<int32_t>(buffer_view.size_bytes) + 1;
+    NANOARROW_RETURN_NOT_OK(WriteChecked<int32_t>(buffer, field_size_bytes, error));
+    constexpr int8_t kJsonbVersion = 0x01;
+    NANOARROW_RETURN_NOT_OK(WriteChecked<int8_t>(buffer, kJsonbVersion, error));
+    NANOARROW_RETURN_NOT_OK(
+        ArrowBufferAppend(buffer, buffer_view.data.as_uint8, buffer_view.size_bytes));
+    return ADBC_STATUS_OK;
+  }
+};
+
 class PostgresCopyBinaryDictFieldWriter : public PostgresCopyFieldWriter {
  public:
   ArrowErrorCode Write(ArrowBuffer* buffer, int64_t index, ArrowError* error) override {
@@ -748,7 +766,7 @@ class PostgresCopyTimestampFieldWriter : public PostgresCopyFieldWriter {
 
 static inline ArrowErrorCode MakeCopyFieldWriter(
     struct ArrowSchema* schema, struct ArrowArrayView* array_view,
-    const PostgresTypeResolver& type_resolver,
+    const PostgresTypeResolver& type_resolver, const PostgresType& pg_type,
     std::unique_ptr<PostgresCopyFieldWriter>* out, ArrowError* error) {
   struct ArrowSchemaView schema_view;
   NANOARROW_RETURN_NOT_OK(ArrowSchemaViewInit(&schema_view, schema, error));
@@ -826,11 +844,19 @@ static inline ArrowErrorCode MakeCopyFieldWriter(
     case NANOARROW_TYPE_LARGE_BINARY:
     case NANOARROW_TYPE_FIXED_SIZE_BINARY:
     case NANOARROW_TYPE_BINARY_VIEW:
+      using TBin = PostgresCopyBinaryFieldWriter;
+      *out = TBin::Create<TBin>(array_view);
+      return NANOARROW_OK;
     case NANOARROW_TYPE_STRING:
     case NANOARROW_TYPE_LARGE_STRING:
     case NANOARROW_TYPE_STRING_VIEW: {
-      using T = PostgresCopyBinaryFieldWriter;
-      *out = T::Create<T>(array_view);
+      if (pg_type.type_id() == PostgresTypeId::kJsonb) {
+        using T = PostgresCopyJsonbFieldWriter;
+        *out = T::Create<T>(array_view);
+      } else {
+        using T = PostgresCopyBinaryFieldWriter;
+        *out = T::Create<T>(array_view);
+      }
       return NANOARROW_OK;
     }
     case NANOARROW_TYPE_TIMESTAMP: {
@@ -921,7 +947,7 @@ static inline ArrowErrorCode MakeCopyFieldWriter(
       std::unique_ptr<PostgresCopyFieldWriter> child_writer;
       NANOARROW_RETURN_NOT_OK(MakeCopyFieldWriter(schema->children[0],
                                                   array_view->children[0], type_resolver,
-                                                  &child_writer, error));
+                                                  child_type, &child_writer, error));
 
       if (schema_view.type == NANOARROW_TYPE_FIXED_SIZE_LIST) {
         using T = PostgresCopyListFieldWriter<true>;
@@ -979,6 +1005,7 @@ class PostgresCopyStreamWriter {
   }
 
   ArrowErrorCode InitFieldWriters(const PostgresTypeResolver& type_resolver,
+                                  const std::vector<PostgresType>& pg_types,
                                   ArrowError* error) {
     if (schema_->release == nullptr) {
       return EINVAL;
@@ -986,9 +1013,11 @@ class PostgresCopyStreamWriter {
 
     for (int64_t i = 0; i < schema_->n_children; i++) {
       std::unique_ptr<PostgresCopyFieldWriter> child_writer;
+      const PostgresType& pg_type =
+          static_cast<size_t>(i) < pg_types.size() ? pg_types[i] : PostgresType();
       NANOARROW_RETURN_NOT_OK(MakeCopyFieldWriter(schema_->children[i],
                                                   array_view_->children[i], type_resolver,
-                                                  &child_writer, error));
+                                                  pg_type, &child_writer, error));
       root_writer_->AppendChild(std::move(child_writer));
     }
 

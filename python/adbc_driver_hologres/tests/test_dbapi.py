@@ -892,9 +892,6 @@ def test_ingest_json(hologres: dbapi.Connection) -> None:
         cur.execute("DROP TABLE IF EXISTS hg_test_json")
 
 
-@pytest.mark.xfail(
-    reason="COPY binary protocol JSONB version byte not supported by Hologres"
-)
 def test_ingest_jsonb(hologres: dbapi.Connection) -> None:
     """Test JSONB column via DDL + append."""
     with hologres.cursor() as cur:
