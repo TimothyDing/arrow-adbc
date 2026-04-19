@@ -97,4 +97,146 @@ if(ADBC_BUILD_TESTS)
                                      ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
   )
   adbc_configure_target(adbc-driver-hologres-stage-test)
+
+  add_test_case(driver_hologres_database_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                database_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-database-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-database-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-database-test)
+
+  add_test_case(driver_hologres_connection_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                connection_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-connection-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-connection-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-connection-test)
+
+  add_test_case(driver_hologres_statement_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                statement_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-statement-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-statement-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-statement-test)
+
+  add_test_case(driver_hologres_postgres_util_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                postgres_util_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-postgres-util-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-postgres-util-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-postgres-util-test)
+
+  add_test_case(driver_hologres_postgres_type_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                postgres_type_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                adbc_validation
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-postgres-type-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-postgres-type-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-postgres-type-test)
+
+  add_test_case(driver_hologres_copy_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                copy_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                adbc_validation
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-copy-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-copy-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-copy-test)
+
+  add_test_case(driver_hologres_error_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                error_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-error-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-error-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-error-test)
 endif()
