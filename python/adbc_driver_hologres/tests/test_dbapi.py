@@ -1098,6 +1098,33 @@ def test_ingest_list_float(hologres: dbapi.Connection) -> None:
         cur.execute("DROP TABLE IF EXISTS hg_test_list_flt")
 
 
+def test_ingest_list_float4(hologres: dbapi.Connection) -> None:
+    with hologres.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS hg_test_list_flt4")
+        cur.execute("CREATE TABLE hg_test_list_flt4 (arr FLOAT4[])")
+
+        table = pyarrow.table(
+            {
+                "arr": pyarrow.array(
+                    [[1.1, 2.2], [3.3], None],
+                    type=pyarrow.list_(pyarrow.float32()),
+                ),
+            }
+        )
+        cur.adbc_ingest("hg_test_list_flt4", table, mode="append")
+
+        cur.execute(
+            "SELECT arr FROM hg_test_list_flt4 ORDER BY arr NULLS LAST"
+        )
+        result = cur.fetch_arrow_table()
+        vals = result.column("arr").to_pylist()
+        assert len(vals[0]) == 2
+        assert abs(vals[0][0] - 1.1) < 0.01  # float32 精度较低，epsilon 放宽
+        assert vals[2] is None
+
+        cur.execute("DROP TABLE IF EXISTS hg_test_list_flt4")
+
+
 def test_ingest_fixed_size_list(hologres: dbapi.Connection) -> None:
     with hologres.cursor() as cur:
         cur.execute("DROP TABLE IF EXISTS hg_test_fsl")
@@ -1295,6 +1322,44 @@ def test_stage_list_types(hologres: dbapi.Connection) -> None:
         ints_vals = result.column("ints").to_pylist()
         assert [1, 2] in ints_vals
         assert [3, 4, 5] in ints_vals
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_stage_list_float_types(hologres: dbapi.Connection) -> None:
+    """Stage mode: list<float32>, list<float64> round-trip."""
+    table_name = "hg_test_stage_list_flt"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} (f4 FLOAT4[], f8 FLOAT8[])"
+        )
+
+        table = pyarrow.table(
+            {
+                "f4": pyarrow.array(
+                    [[1.1, 2.2], [3.3, 4.4]],
+                    type=pyarrow.list_(pyarrow.float32()),
+                ),
+                "f8": pyarrow.array(
+                    [[5.5, 6.6], [7.7, 8.8]],
+                    type=pyarrow.list_(pyarrow.float64()),
+                ),
+            }
+        )
+        cur.adbc_statement.set_options(
+            **{StatementOptions.INGEST_MODE.value: "stage"}
+        )
+        cur.adbc_ingest(table_name, table, mode="append")
+
+        cur.execute(f"SELECT f4, f8 FROM {table_name} ORDER BY f4")
+        result = cur.fetch_arrow_table()
+        assert result.num_rows == 2
+        f4_vals = result.column("f4").to_pylist()
+        f8_vals = result.column("f8").to_pylist()
+        # float32 近似比较
+        assert abs(f4_vals[0][0] - 1.1) < 0.01
+        assert abs(f8_vals[0][0] - 5.5) < 0.001
 
         cur.execute(f"DROP TABLE IF EXISTS {table_name}")
 
