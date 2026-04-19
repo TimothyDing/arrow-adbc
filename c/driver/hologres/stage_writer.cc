@@ -112,6 +112,193 @@ static ArrowErrorCode ConvertFixedSizeListArrays(
   return NANOARROW_OK;
 }
 
+// ---------------------------------------------------------------------------
+// Stage type conversions: Hologres EXTERNAL_FILES expects specific Arrow types
+// that may differ from what users provide.
+//   TIMESTAMPTZ: timestamp[us, tz=*] → date64[ms] (DateMilli)
+//   BYTEA from large_binary → binary (VarBinary)
+//   TEXT from large_string  → string/utf8 (VarChar)
+// ---------------------------------------------------------------------------
+
+enum class StageConversionKind {
+  kTimestampTzToDateMilli,
+  kLargeBinaryToBinary,
+  kLargeStringToString,
+};
+
+struct StageTypeConversion {
+  int col_index;
+  StageConversionKind kind;
+};
+
+/// Scan schema for columns needing Stage-specific type conversion.
+static bool FindStageTypeConversions(
+    const struct ArrowSchema* schema,
+    std::vector<StageTypeConversion>* conversions) {
+  conversions->clear();
+  for (int i = 0; i < schema->n_children; i++) {
+    struct ArrowSchemaView view;
+    struct ArrowError error;
+    if (ArrowSchemaViewInit(&view, schema->children[i], &error) != NANOARROW_OK) {
+      continue;
+    }
+    if (view.type == NANOARROW_TYPE_TIMESTAMP &&
+        view.timezone != nullptr && view.timezone[0] != '\0') {
+      conversions->push_back({i, StageConversionKind::kTimestampTzToDateMilli});
+    } else if (view.type == NANOARROW_TYPE_LARGE_BINARY) {
+      conversions->push_back({i, StageConversionKind::kLargeBinaryToBinary});
+    } else if (view.type == NANOARROW_TYPE_LARGE_STRING) {
+      conversions->push_back({i, StageConversionKind::kLargeStringToString});
+    }
+  }
+  return !conversions->empty();
+}
+
+/// Deep-copy schema and apply Stage type format conversions.
+static ArrowErrorCode ConvertStageTypeSchema(
+    const struct ArrowSchema* src, struct ArrowSchema* dst,
+    const std::vector<StageTypeConversion>& conversions,
+    struct ArrowError* error) {
+  NANOARROW_RETURN_NOT_OK(ArrowSchemaDeepCopy(src, dst));
+
+  for (const auto& conv : conversions) {
+    const char* new_format = nullptr;
+    switch (conv.kind) {
+      case StageConversionKind::kTimestampTzToDateMilli:
+        new_format = "tdm";
+        break;
+      case StageConversionKind::kLargeBinaryToBinary:
+        new_format = "z";
+        break;
+      case StageConversionKind::kLargeStringToString:
+        new_format = "u";
+        break;
+    }
+    NANOARROW_RETURN_NOT_OK(
+        ArrowSchemaSetFormat(dst->children[conv.col_index], new_format));
+  }
+  return NANOARROW_OK;
+}
+
+/// State saved per-column for restoring arrays after IPC serialization.
+struct StageConversionState {
+  int col_index;
+  StageConversionKind kind;
+  const void* orig_buffer_1;   // original buffers[1]
+  const void* orig_buffer_2;   // original buffers[2] (for large_binary/string)
+  int64_t orig_offset;         // original child->offset
+  void* allocated_buffer;      // newly allocated buffer to free on restore
+};
+
+/// Convert array data in-place for Stage type conversions.
+/// Returns conversion states that must be passed to RestoreStageTypeArrays.
+static ArrowErrorCode ConvertStageTypeArrays(
+    struct ArrowArray* array,
+    const std::vector<StageTypeConversion>& conversions,
+    std::vector<StageConversionState>* states,
+    struct ArrowError* error) {
+  states->clear();
+  states->reserve(conversions.size());
+
+  for (const auto& conv : conversions) {
+    struct ArrowArray* child = array->children[conv.col_index];
+    StageConversionState state;
+    state.col_index = conv.col_index;
+    state.kind = conv.kind;
+    state.orig_buffer_1 = child->buffers[1];
+    state.orig_buffer_2 = (child->n_buffers > 2) ? child->buffers[2] : nullptr;
+    state.orig_offset = child->offset;
+    state.allocated_buffer = nullptr;
+
+    switch (conv.kind) {
+      case StageConversionKind::kTimestampTzToDateMilli: {
+        // Convert timestamp microseconds → date64 milliseconds (divide by 1000)
+        int64_t len = child->length;
+        auto* new_data = static_cast<int64_t*>(
+            std::malloc(static_cast<size_t>(len) * sizeof(int64_t)));
+        if (new_data == nullptr) {
+          // Clean up previously allocated buffers
+          for (auto& s : *states) {
+            auto* c = array->children[s.col_index];
+            c->buffers[1] = s.orig_buffer_1;
+            if (s.kind != StageConversionKind::kTimestampTzToDateMilli &&
+                c->n_buffers > 2) {
+              c->buffers[2] = s.orig_buffer_2;
+            }
+            c->offset = s.orig_offset;
+            std::free(s.allocated_buffer);
+          }
+          return ENOMEM;
+        }
+        const auto* src_data =
+            static_cast<const int64_t*>(child->buffers[1]) + child->offset;
+        for (int64_t j = 0; j < len; j++) {
+          new_data[j] = src_data[j] / 1000;
+        }
+        state.allocated_buffer = new_data;
+        child->buffers[1] = new_data;
+        child->offset = 0;
+        break;
+      }
+      case StageConversionKind::kLargeBinaryToBinary:
+      case StageConversionKind::kLargeStringToString: {
+        // Convert int64 offsets → int32 offsets
+        int64_t n_offsets = child->length + 1;
+        const auto* src_offsets =
+            static_cast<const int64_t*>(child->buffers[1]) + child->offset;
+        auto* new_offsets = static_cast<int32_t*>(
+            std::malloc(static_cast<size_t>(n_offsets) * sizeof(int32_t)));
+        if (new_offsets == nullptr) {
+          for (auto& s : *states) {
+            auto* c = array->children[s.col_index];
+            c->buffers[1] = s.orig_buffer_1;
+            if (s.kind != StageConversionKind::kTimestampTzToDateMilli &&
+                c->n_buffers > 2) {
+              c->buffers[2] = s.orig_buffer_2;
+            }
+            c->offset = s.orig_offset;
+            std::free(s.allocated_buffer);
+          }
+          return ENOMEM;
+        }
+        // Rebase offsets so first offset is 0
+        int64_t base_offset = src_offsets[0];
+        for (int64_t j = 0; j < n_offsets; j++) {
+          new_offsets[j] = static_cast<int32_t>(src_offsets[j] - base_offset);
+        }
+        state.allocated_buffer = new_offsets;
+        child->buffers[1] = new_offsets;
+        // Shift data buffer to start at base_offset
+        if (base_offset > 0 && child->n_buffers > 2 &&
+            child->buffers[2] != nullptr) {
+          child->buffers[2] =
+              static_cast<const uint8_t*>(child->buffers[2]) + base_offset;
+        }
+        child->offset = 0;
+        break;
+      }
+    }
+    states->push_back(state);
+  }
+  return NANOARROW_OK;
+}
+
+/// Restore array buffers after Stage type conversion + IPC serialization.
+static void RestoreStageTypeArrays(
+    struct ArrowArray* array,
+    const std::vector<StageConversionState>& states) {
+  for (auto it = states.rbegin(); it != states.rend(); ++it) {
+    struct ArrowArray* child = array->children[it->col_index];
+    child->buffers[1] = it->orig_buffer_1;
+    if (it->kind != StageConversionKind::kTimestampTzToDateMilli &&
+        child->n_buffers > 2) {
+      child->buffers[2] = it->orig_buffer_2;
+    }
+    child->offset = it->orig_offset;
+    std::free(it->allocated_buffer);
+  }
+}
+
 /// Estimate the serialized size of an ArrowArray in bytes.
 static int64_t EstimateArraySize(
     const struct ArrowSchema* schema, const struct ArrowArray* array,
@@ -441,24 +628,69 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
   }
 
   std::vector<std::pair<int, int32_t>> fsl_fields;
-  nanoarrow::UniqueSchema ipc_schema;
   bool needs_fsl_conversion = FindFixedSizeListFields(schema.get(), &fsl_fields);
 
-  if (needs_fsl_conversion) {
-    result = ConvertFixedSizeListSchema(schema.get(), ipc_schema.get(), &na_error);
-    if (result != NANOARROW_OK) {
-      buffer_queue_->Close();
-      for (auto& thread : upload_threads_) {
-        if (thread.joinable()) thread.join();
+  std::vector<StageTypeConversion> stage_conversions;
+  bool needs_stage_conversion =
+      FindStageTypeConversions(schema.get(), &stage_conversions);
+
+  // Build the IPC schema by applying all needed conversions.
+  // We may need up to two schema transformations (FSL + Stage types),
+  // so we chain them: original → fsl_schema → final ipc_schema.
+  nanoarrow::UniqueSchema ipc_schema;
+  bool needs_any_schema_conversion = needs_fsl_conversion || needs_stage_conversion;
+
+  if (needs_any_schema_conversion) {
+    if (needs_fsl_conversion && needs_stage_conversion) {
+      // Apply FSL conversion first, then Stage type conversion on top
+      nanoarrow::UniqueSchema fsl_schema;
+      result = ConvertFixedSizeListSchema(schema.get(), fsl_schema.get(), &na_error);
+      if (result != NANOARROW_OK) {
+        buffer_queue_->Close();
+        for (auto& thread : upload_threads_) {
+          if (thread.joinable()) thread.join();
+        }
+        return Status::IO(
+            "[hologres] Failed to convert FIXED_SIZE_LIST schema for stage: ",
+            na_error.message);
       }
-      return Status::IO(
-          "[hologres] Failed to convert FIXED_SIZE_LIST schema for stage: ",
-          na_error.message);
+      result = ConvertStageTypeSchema(fsl_schema.get(), ipc_schema.get(),
+                                      stage_conversions, &na_error);
+      if (result != NANOARROW_OK) {
+        buffer_queue_->Close();
+        for (auto& thread : upload_threads_) {
+          if (thread.joinable()) thread.join();
+        }
+        return Status::IO(
+            "[hologres] Failed to convert stage type schema: ", na_error.message);
+      }
+    } else if (needs_fsl_conversion) {
+      result = ConvertFixedSizeListSchema(schema.get(), ipc_schema.get(), &na_error);
+      if (result != NANOARROW_OK) {
+        buffer_queue_->Close();
+        for (auto& thread : upload_threads_) {
+          if (thread.joinable()) thread.join();
+        }
+        return Status::IO(
+            "[hologres] Failed to convert FIXED_SIZE_LIST schema for stage: ",
+            na_error.message);
+      }
+    } else {
+      result = ConvertStageTypeSchema(schema.get(), ipc_schema.get(),
+                                      stage_conversions, &na_error);
+      if (result != NANOARROW_OK) {
+        buffer_queue_->Close();
+        for (auto& thread : upload_threads_) {
+          if (thread.joinable()) thread.join();
+        }
+        return Status::IO(
+            "[hologres] Failed to convert stage type schema: ", na_error.message);
+      }
     }
   }
 
   struct ArrowSchema* ipc_schema_ptr =
-      needs_fsl_conversion ? ipc_schema.get() : schema.get();
+      needs_any_schema_conversion ? ipc_schema.get() : schema.get();
 
   nanoarrow::UniqueArray array;
 
@@ -487,6 +719,21 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
         return Status::IO(
             "[hologres] Failed to convert FIXED_SIZE_LIST arrays for stage: ",
             na_error.message);
+      }
+    }
+
+    // Apply Stage type array conversions (timestamptz→date64, large_*→small)
+    std::vector<StageConversionState> stage_states;
+    if (needs_stage_conversion) {
+      result = ConvertStageTypeArrays(array.get(), stage_conversions,
+                                      &stage_states, &na_error);
+      if (result != NANOARROW_OK) {
+        buffer_queue_->Close();
+        for (auto& thread : upload_threads_) {
+          if (thread.joinable()) thread.join();
+        }
+        return Status::IO(
+            "[hologres] Failed to convert stage type arrays: ", na_error.message);
       }
     }
 
@@ -686,6 +933,9 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
         }
         array->offset = orig_offset;
         array->length = orig_length;
+        if (needs_stage_conversion) {
+          RestoreStageTypeArrays(array.get(), stage_states);
+        }
         buffer_queue_->Close();
         for (auto& thread : upload_threads_) {
           if (thread.joinable()) thread.join();
@@ -728,6 +978,9 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
       }
 
       if (!ipc_status.ok()) {
+        if (needs_stage_conversion) {
+          RestoreStageTypeArrays(array.get(), stage_states);
+        }
         buffer_queue_->Close();
         for (auto& thread : upload_threads_) {
           if (thread.joinable()) thread.join();
@@ -745,6 +998,11 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
       buffer_queue_->Push(std::move(buffer));
 
       rows_processed += slice_length;
+    }
+
+    // Restore Stage type conversions for this batch
+    if (needs_stage_conversion) {
+      RestoreStageTypeArrays(array.get(), stage_states);
     }
 
     array.reset();
