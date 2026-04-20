@@ -97,7 +97,8 @@ class HologresStageWriter {
                          const std::string& escaped_field_list,
                          const std::string& escaped_type_list,
                          OnConflictMode on_conflict,
-                         const std::string& pk_columns = "");
+                         const std::string& pk_columns = "",
+                         const std::string& escaped_select_list = "");
   Status DropStage();
 
   const std::string& stage_name() const { return config_.stage_name; }

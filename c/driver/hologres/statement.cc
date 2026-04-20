@@ -34,6 +34,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -760,6 +761,41 @@ AdbcStatusCode HologresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
   return ADBC_STATUS_OK;
 }
 
+/// Query the target table's actual column types from pg_catalog.
+/// Returns a map of column_name -> format_type string (e.g., "jsonb", "character(10)").
+static Status ResolveTargetColumnTypes(
+    PGconn* conn, const std::string& schema_name, const std::string& table_name,
+    std::unordered_map<std::string, std::string>* col_types) {
+  const char* query =
+      "SELECT a.attname, format_type(a.atttypid, a.atttypmod)"
+      " FROM pg_catalog.pg_attribute a"
+      " JOIN pg_catalog.pg_class c ON c.oid = a.attrelid"
+      " JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+      " WHERE n.nspname = $1 AND c.relname = $2"
+      "   AND a.attnum > 0 AND NOT a.attisdropped"
+      " ORDER BY a.attnum";
+  const char* param_values[2] = {schema_name.c_str(), table_name.c_str()};
+  PGresult* result = PQexecParams(conn, query, /*nParams=*/2, /*paramTypes=*/nullptr,
+                                  param_values, /*paramLengths=*/nullptr,
+                                  /*paramFormats=*/nullptr, /*resultFormat=*/0);
+  if (PQresultStatus(result) != PGRES_TUPLES_OK) {
+    std::string msg = PQerrorMessage(conn);
+    PQclear(result);
+    return Status::IO("[hologres] Failed to query column types: ", msg);
+  }
+
+  int nrows = PQntuples(result);
+  for (int i = 0; i < nrows; i++) {
+    const char* col_name = PQgetvalue(result, i, 0);
+    const char* col_type = PQgetvalue(result, i, 1);
+    if (col_name && col_type) {
+      (*col_types)[col_name] = col_type;
+    }
+  }
+  PQclear(result);
+  return Status::Ok();
+}
+
 AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* stream,
                                                      int64_t* rows_affected,
                                                      struct AdbcError* error) {
@@ -803,6 +839,79 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
                         &escaped_field_list, &escaped_type_list, &tmp_error);
     return adbc::driver::Status::FromAdbc(status_code, tmp_error);
   }));
+
+  // Resolve actual column types from target table.
+  // EXTERNAL_FILES returns data based on Arrow IPC types (utf8 → text, binary → bytea).
+  // For types like json/jsonb/roaringbitmap, EXTERNAL_FILES cannot auto-cast, so we
+  // keep the Arrow-inferred type in the AS clause and add explicit casts in the SELECT
+  // list (e.g., SELECT "col"::jsonb FROM EXTERNAL_FILES(...) AS ("col" text)).
+  // For compatible types (char(n), varchar(n), etc.), the actual type goes in AS clause.
+  std::string escaped_select_list;
+  {
+    std::unordered_map<std::string, std::string> col_types;
+    RAISE_STATUS(error, ResolveTargetColumnTypes(connection_->conn(), current_schema,
+                                                ingest_.target, &col_types));
+    if (!col_types.empty()) {
+      PGconn* conn = connection_->conn();
+      escaped_type_list.clear();
+      bool needs_cast = false;
+      std::string select_parts;
+
+      for (int64_t i = 0; i < bind_stream.bind_schema.value.n_children; i++) {
+        if (i > 0) {
+          escaped_type_list += ", ";
+          select_parts += ", ";
+        }
+        const char* col_name = bind_stream.bind_schema.value.children[i]->name;
+        char* escaped =
+            PQescapeIdentifier(conn, col_name, std::strlen(col_name));
+        if (escaped == nullptr) {
+          InternalAdbcSetError(
+              error,
+              "[hologres] Failed to escape column %s for type resolution: %s",
+              col_name, PQerrorMessage(conn));
+          return ADBC_STATUS_INTERNAL;
+        }
+        std::string escaped_col(escaped);
+        PQfreemem(escaped);
+
+        // Determine Arrow-inferred type for AS clause fallback
+        std::string arrow_type = "text";
+        {
+          adbcpq::PostgresType pg_type;
+          struct ArrowError na_error;
+          if (adbcpq::PostgresType::FromSchema(
+                  *type_resolver_, bind_stream.bind_schema.value.children[i],
+                  &pg_type, &na_error) == NANOARROW_OK) {
+            arrow_type = pg_type.sql_type_name();
+          }
+        }
+
+        auto it = col_types.find(col_name);
+        if (it != col_types.end()) {
+          const std::string& target_type = it->second;
+          // Types that EXTERNAL_FILES cannot auto-cast from Arrow types —
+          // need explicit SELECT ... ::type cast
+          if (target_type == "json" || target_type == "jsonb" ||
+              target_type == "roaringbitmap") {
+            escaped_type_list += escaped_col + " " + arrow_type;
+            select_parts += escaped_col + "::" + target_type;
+            needs_cast = true;
+          } else {
+            escaped_type_list += escaped_col + " " + target_type;
+            select_parts += escaped_col;
+          }
+        } else {
+          escaped_type_list += escaped_col + " " + arrow_type;
+          select_parts += escaped_col;
+        }
+      }
+
+      if (needs_cast) {
+        escaped_select_list = std::move(select_parts);
+      }
+    }
+  }
 
   // Create stage configuration
   HologresStageConfig config;
@@ -891,7 +1000,7 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
   // Insert from stage using main connection
   auto insert_status = main_writer.InsertFromStage(escaped_table, escaped_field_list,
                                                     escaped_type_list, ingest_.on_conflict,
-                                                    pk_columns);
+                                                    pk_columns, escaped_select_list);
   if (!insert_status.ok()) {
     main_writer.DropStage();
     return insert_status.ToAdbc(error);

@@ -100,8 +100,8 @@ AdbcStatusCode HologresDatabase::Init(struct AdbcError* error) {
 AdbcStatusCode HologresDatabase::Release(struct AdbcError* error) {
   if (open_connections_ != 0) {
     InternalAdbcSetError(error, "%s%" PRId32 "%s",
-                         "[hologres] Database released with ", open_connections_,
-                         " open connections");
+                         "[hologres] Database released with ",
+                         open_connections_.load(), " open connections");
     return ADBC_STATUS_INVALID_STATE;
   }
   uri_.clear();

@@ -1027,11 +1027,17 @@ Status HologresStageWriter::InsertFromStage(const std::string& target_table,
                                             const std::string& escaped_field_list,
                                             const std::string& escaped_type_list,
                                             OnConflictMode on_conflict,
-                                            const std::string& pk_columns) {
+                                            const std::string& pk_columns,
+                                            const std::string& escaped_select_list) {
+  // Use explicit select list with casts when provided (for json/jsonb/etc.),
+  // otherwise fall back to SELECT *
+  const std::string& select_expr =
+      escaped_select_list.empty() ? std::string("*") : escaped_select_list;
   std::string sql = fmt::format(
-      "INSERT INTO {} ({}) SELECT * FROM EXTERNAL_FILES("
+      "INSERT INTO {} ({}) SELECT {} FROM EXTERNAL_FILES("
       "path='internal_stage://{}') AS ({})",
-      target_table, escaped_field_list, config_.stage_name, escaped_type_list);
+      target_table, escaped_field_list, select_expr, config_.stage_name,
+      escaped_type_list);
 
   if (on_conflict == OnConflictMode::kIgnore) {
     sql += " ON CONFLICT DO NOTHING";

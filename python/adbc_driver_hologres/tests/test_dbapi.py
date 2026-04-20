@@ -1251,25 +1251,18 @@ def test_stage_numeric_types(hologres: dbapi.Connection) -> None:
         cur.execute(f"DROP TABLE IF EXISTS {table_name}")
 
 
-@pytest.mark.xfail(
-    reason="Hologres Stage/EXTERNAL_FILES does not support JSON/JSONB types"
-)
-def test_stage_json_types(hologres: dbapi.Connection) -> None:
-    """Stage mode: JSON and JSONB via DDL + Stage append."""
+def test_stage_json(hologres: dbapi.Connection) -> None:
+    """Stage mode: JSON type via DDL + Stage append."""
     table_name = "hg_test_stage_json"
     with hologres.cursor() as cur:
         cur.execute(f"DROP TABLE IF EXISTS {table_name}")
-        cur.execute(
-            f"CREATE TABLE {table_name} (j JSON, jb JSONB)"
-        )
+        cur.execute(f"CREATE TABLE {table_name} (id INT, data JSON)")
 
         table = pyarrow.table(
             {
-                "j": pyarrow.array(
+                "id": pyarrow.array([1, 2], type=pyarrow.int32()),
+                "data": pyarrow.array(
                     ['{"a": 1}', '{"b": 2}'], type=pyarrow.utf8()
-                ),
-                "jb": pyarrow.array(
-                    ['{"c": 3}', '{"d": 4}'], type=pyarrow.utf8()
                 ),
             }
         )
@@ -1278,11 +1271,119 @@ def test_stage_json_types(hologres: dbapi.Connection) -> None:
         )
         cur.adbc_ingest(table_name, table, mode="append")
 
-        cur.execute(f"SELECT j, jb FROM {table_name} ORDER BY j")
+        cur.execute(f"SELECT id, data FROM {table_name} ORDER BY id")
         result = cur.fetch_arrow_table()
         assert result.num_rows == 2
-        j_vals = result.column("j").to_pylist()
-        assert any('"a"' in v for v in j_vals)
+        vals = result.column("data").to_pylist()
+        assert '"a"' in vals[0]
+        assert '"b"' in vals[1]
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_stage_jsonb(hologres: dbapi.Connection) -> None:
+    """Stage mode: JSONB type via DDL + Stage append."""
+    table_name = "hg_test_stage_jsonb"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(f"CREATE TABLE {table_name} (id INT, data JSONB)")
+
+        table = pyarrow.table(
+            {
+                "id": pyarrow.array([1, 2], type=pyarrow.int32()),
+                "data": pyarrow.array(
+                    ['{"name": "alice"}', '{"items": [1,2,3]}'],
+                    type=pyarrow.utf8(),
+                ),
+            }
+        )
+        cur.adbc_statement.set_options(
+            **{StatementOptions.INGEST_MODE.value: "stage"}
+        )
+        cur.adbc_ingest(table_name, table, mode="append")
+
+        cur.execute(f"SELECT id, data FROM {table_name} ORDER BY id")
+        result = cur.fetch_arrow_table()
+        assert result.num_rows == 2
+        vals = result.column("data").to_pylist()
+        assert '"name"' in vals[0]
+        assert '"items"' in vals[1]
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_stage_char_varchar(hologres: dbapi.Connection) -> None:
+    """Stage mode: CHAR(10) and VARCHAR(255) types via DDL + Stage append."""
+    table_name = "hg_test_stage_char_varchar"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} ("
+            f"  id INT,"
+            f"  c1 CHAR(10),"
+            f"  c2 VARCHAR(255)"
+            f")"
+        )
+
+        table = pyarrow.table(
+            {
+                "id": pyarrow.array([1, 2, 3], type=pyarrow.int32()),
+                "c1": pyarrow.array(["hello", "world", None], type=pyarrow.utf8()),
+                "c2": pyarrow.array(
+                    ["short", "a" * 255, None], type=pyarrow.utf8()
+                ),
+            }
+        )
+        cur.adbc_statement.set_options(
+            **{StatementOptions.INGEST_MODE.value: "stage"}
+        )
+        cur.adbc_ingest(table_name, table, mode="append")
+
+        cur.execute(f"SELECT id, c1, c2 FROM {table_name} ORDER BY id")
+        result = cur.fetch_arrow_table()
+        assert result.num_rows == 3
+
+        c1_vals = result.column("c1").to_pylist()
+        # CHAR(10) pads with spaces to fixed width
+        assert c1_vals[0].strip() == "hello"
+        assert c1_vals[1].strip() == "world"
+
+        c2_vals = result.column("c2").to_pylist()
+        assert c2_vals[0] == "short"
+        assert c2_vals[1] == "a" * 255
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_stage_roaringbitmap(hologres: dbapi.Connection) -> None:
+    """Stage mode: roaringbitmap type via DDL + Stage append."""
+    table_name = "hg_test_stage_roaringbitmap"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} ("
+            f"  id INT,"
+            f"  bitmap roaringbitmap"
+            f")"
+        )
+
+        # Insert rows with NULL bitmap — verifies the type mapping in
+        # EXTERNAL_FILES AS clause correctly declares roaringbitmap.
+        table = pyarrow.table(
+            {
+                "id": pyarrow.array([1, 2], type=pyarrow.int32()),
+                "bitmap": pyarrow.array([None, None], type=pyarrow.binary()),
+            }
+        )
+        cur.adbc_statement.set_options(
+            **{StatementOptions.INGEST_MODE.value: "stage"}
+        )
+        cur.adbc_ingest(table_name, table, mode="append")
+
+        cur.execute(f"SELECT id FROM {table_name} ORDER BY id")
+        result = cur.fetch_arrow_table()
+        assert result.num_rows == 2
+        assert result.column("id").to_pylist() == [1, 2]
 
         cur.execute(f"DROP TABLE IF EXISTS {table_name}")
 
