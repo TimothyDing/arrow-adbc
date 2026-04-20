@@ -164,6 +164,48 @@ TEST(MakeFixedFeUriTest, EmptyUri) {
 }
 
 // ===========================================================================
+// EnsureApplicationName tests
+// ===========================================================================
+
+TEST(EnsureApplicationNameTest, NoQueryParams) {
+  std::string result = EnsureApplicationName("postgres://host/db");
+  EXPECT_EQ(result,
+            "postgres://host/db?application_name=adbc_hologres_" ADBC_HOLOGRES_VERSION);
+}
+
+TEST(EnsureApplicationNameTest, ExistingQueryParams) {
+  std::string result = EnsureApplicationName("postgres://host/db?sslmode=require");
+  EXPECT_EQ(
+      result,
+      "postgres://host/db?sslmode=require&application_name=adbc_hologres_" ADBC_HOLOGRES_VERSION);
+}
+
+TEST(EnsureApplicationNameTest, UserSetApplicationName) {
+  std::string result = EnsureApplicationName("postgres://host/db?application_name=my_app");
+  EXPECT_EQ(result, "postgres://host/db?application_name=my_app");
+}
+
+TEST(EnsureApplicationNameTest, UserSetApplicationNameWithOtherParams) {
+  std::string result = EnsureApplicationName(
+      "postgres://host/db?sslmode=require&application_name=my_app&foo=bar");
+  EXPECT_EQ(result,
+            "postgres://host/db?sslmode=require&application_name=my_app&foo=bar");
+}
+
+TEST(EnsureApplicationNameTest, WithFixedFeUri) {
+  std::string fixed = MakeFixedFeUri("postgres://host/db");
+  std::string result = EnsureApplicationName(fixed);
+  EXPECT_NE(result.find("options=type%3Dfixed"), std::string::npos);
+  EXPECT_NE(result.find("application_name=adbc_hologres_"), std::string::npos);
+}
+
+TEST(EnsureApplicationNameTest, EmptyUri) {
+  std::string result = EnsureApplicationName("");
+  EXPECT_EQ(result,
+            "?application_name=adbc_hologres_" ADBC_HOLOGRES_VERSION);
+}
+
+// ===========================================================================
 // HologresDatabase option tests
 // ===========================================================================
 

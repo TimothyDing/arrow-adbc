@@ -453,7 +453,7 @@ AdbcStatusCode HologresConnection::GetInfo(struct AdbcConnection* connection,
         infos.push_back({info_codes[i], "ADBC Hologres Driver"});
         break;
       case ADBC_INFO_DRIVER_VERSION:
-        infos.push_back({info_codes[i], "unknown"});
+        infos.push_back({info_codes[i], ADBC_HOLOGRES_VERSION});
         break;
       case ADBC_INFO_DRIVER_ARROW_VERSION:
         infos.push_back({info_codes[i], "v" NANOARROW_VERSION});

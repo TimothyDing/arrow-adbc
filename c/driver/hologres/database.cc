@@ -143,7 +143,8 @@ AdbcStatusCode HologresDatabase::Connect(PGconn** conn, struct AdbcError* error)
         "[hologres] Must set database option 'uri' before creating a connection");
     return ADBC_STATUS_INVALID_STATE;
   }
-  *conn = PQconnectdb(uri_.c_str());
+  std::string connect_uri = EnsureApplicationName(uri_);
+  *conn = PQconnectdb(connect_uri.c_str());
   if (PQstatus(*conn) != CONNECTION_OK) {
     InternalAdbcSetError(error, "%s%s",
                          "[hologres] Failed to connect: ", PQerrorMessage(*conn));
@@ -227,6 +228,19 @@ std::string MakeFixedFeUri(const std::string& uri) {
   std::string result = uri;
   result.insert(options_pos + 8, "type%3Dfixed%20");
   return result;
+}
+
+std::string EnsureApplicationName(const std::string& uri) {
+  const char* const kAppName = "application_name=adbc_hologres_" ADBC_HOLOGRES_VERSION;
+
+  size_t query_pos = uri.find('?');
+  if (query_pos != std::string::npos) {
+    if (uri.find("application_name=", query_pos) != std::string::npos) {
+      return uri;
+    }
+    return uri + "&" + kAppName;
+  }
+  return uri + "?" + kAppName;
 }
 
 Status HologresDatabase::InitVersions(PGconn* conn) {

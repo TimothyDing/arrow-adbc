@@ -795,6 +795,7 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
   // Hologres COPY EXTERNAL_FILES requires FixedFE connection (options=type=fixed)
   // but CALL statements (HG_CREATE/DROP_INTERNAL_STAGE) require regular FE.
   std::string fixed_uri = MakeFixedFeUri(connection_->database()->uri());
+  fixed_uri = EnsureApplicationName(fixed_uri);
   PGconn* fixed_conn = PQconnectdb(fixed_uri.c_str());
   if (PQstatus(fixed_conn) != CONNECTION_OK) {
     std::string conn_error = PQerrorMessage(fixed_conn);

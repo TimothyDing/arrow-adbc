@@ -56,7 +56,8 @@ add_arrow_lib(adbc_driver_hologres
               ${LIBPQ_STATIC_LIBRARIES})
 
 foreach(LIB_TARGET ${ADBC_LIBRARIES})
-  target_compile_definitions(${LIB_TARGET} PRIVATE ADBC_EXPORTING)
+  target_compile_definitions(${LIB_TARGET} PRIVATE ADBC_EXPORTING
+                            ADBC_HOLOGRES_VERSION="${ADBC_BASE_VERSION}")
   target_include_directories(${LIB_TARGET} SYSTEM
                              PRIVATE ${REPOSITORY_ROOT}/c/
                                      ${REPOSITORY_ROOT}/c/include/

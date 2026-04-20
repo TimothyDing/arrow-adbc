@@ -39,6 +39,11 @@ std::array<int, 3> ParsePrefixedVersion(std::string_view version_info,
 /// Transform a PostgreSQL URI to include FixedFE options for Hologres Stage mode.
 std::string MakeFixedFeUri(const std::string& uri);
 
+/// Ensure the URI includes an application_name parameter.
+/// If the user already specified application_name, their value is preserved.
+/// Otherwise, appends application_name=adbc_hologres_<version>.
+std::string EnsureApplicationName(const std::string& uri);
+
 class HologresDatabase {
  public:
   HologresDatabase();
