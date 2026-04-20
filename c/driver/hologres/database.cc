@@ -305,12 +305,9 @@ ORDER BY
   UNWRAP_STATUS(columns.Execute());
   UNWRAP_STATUS(InsertPgAttributeResult(columns, resolver));
 
-  int32_t max_attempts = 3;
   adbcpq::PqResultHelper types(conn, type_query);
-  for (int32_t i = 0; i < max_attempts; i++) {
-    UNWRAP_STATUS(types.Execute());
-    UNWRAP_STATUS(InsertPgTypeResult(types, resolver));
-  }
+  UNWRAP_STATUS(types.Execute());
+  UNWRAP_STATUS(InsertPgTypeResult(types, resolver));
 
   type_resolver_ = std::move(resolver);
   return Status::Ok();

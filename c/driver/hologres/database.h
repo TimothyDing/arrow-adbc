@@ -18,6 +18,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -82,7 +83,7 @@ class HologresDatabase {
   const std::string& uri() const { return uri_; }
 
  private:
-  int32_t open_connections_;
+  std::atomic<int32_t> open_connections_;
   std::string uri_;
   std::shared_ptr<adbcpq::PostgresTypeResolver> type_resolver_;
   std::array<int, 3> postgres_server_version_{};

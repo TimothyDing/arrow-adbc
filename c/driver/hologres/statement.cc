@@ -381,6 +381,12 @@ AdbcStatusCode HologresStatement::CreateBulkTable(
     } else {
       char* escaped =
           PQescapeIdentifier(conn, current_schema.c_str(), current_schema.size());
+      if (escaped == nullptr) {
+        InternalAdbcSetError(
+            error, "[hologres] Failed to escape current schema for ingestion: %s",
+            PQerrorMessage(conn));
+        return ADBC_STATUS_INTERNAL;
+      }
       *escaped_table += escaped;
       *escaped_table += " . ";
       PQfreemem(escaped);
@@ -757,6 +763,17 @@ AdbcStatusCode HologresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
 AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* stream,
                                                      int64_t* rows_affected,
                                                      struct AdbcError* error) {
+  // Stage mode requires Hologres >= 4.1
+  const auto& hg_version = connection_->database()->HologresVersion();
+  if (hg_version[0] < 4 || (hg_version[0] == 4 && hg_version[1] < 1)) {
+    InternalAdbcSetError(
+        error,
+        "[hologres] Stage ingestion requires Hologres version >= 4.1, "
+        "but server version is %d.%d.%d",
+        hg_version[0], hg_version[1], hg_version[2]);
+    return ADBC_STATUS_NOT_IMPLEMENTED;
+  }
+
   // Get current schema
   std::string current_schema;
   {
@@ -819,29 +836,44 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
   {
     auto fixed_stage_conn = StageConnection::CreateFromPGconn(fixed_conn);
     HologresStageWriter fixed_writer(fixed_stage_conn.get(), config);
-    RAISE_STATUS(error, fixed_writer.WriteToStage(&bind_stream.bind.value, rows_affected));
+    auto write_status = fixed_writer.WriteToStage(&bind_stream.bind.value, rows_affected);
+    if (!write_status.ok()) {
+      main_writer.DropStage();
+      return write_status.ToAdbc(error);
+    }
   }
 
   // Query primary key columns if ON_CONFLICT UPDATE is requested
   std::string pk_columns;
   if (ingest_.on_conflict == OnConflictMode::kUpdate) {
     // Use schema-qualified lookup with pg_class + pg_namespace
-    std::string pk_query = fmt::format(
+    const char* pk_query =
         "SELECT a.attname FROM pg_index i "
         "JOIN pg_attribute a ON a.attrelid = i.indrelid "
         "AND a.attnum = ANY(i.indkey) "
         "JOIN pg_class c ON c.oid = i.indrelid "
         "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = '{}' AND c.relname = '{}' AND i.indisprimary "
-        "ORDER BY array_position(i.indkey, a.attnum)",
-        current_schema, ingest_.target);
-    PGresult* pk_result = PQexec(connection_->conn(), pk_query.c_str());
+        "WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary "
+        "ORDER BY array_position(i.indkey, a.attnum)";
+    const char* param_values[2] = {current_schema.c_str(), ingest_.target.c_str()};
+    PGresult* pk_result = PQexecParams(connection_->conn(), pk_query,
+                                       /*nParams=*/2, /*paramTypes=*/nullptr,
+                                       param_values, /*paramLengths=*/nullptr,
+                                       /*paramFormats=*/nullptr, /*resultFormat=*/0);
     if (PQresultStatus(pk_result) == PGRES_TUPLES_OK) {
       for (int r = 0; r < PQntuples(pk_result); r++) {
         if (r > 0) pk_columns += ", ";
         char* escaped = PQescapeIdentifier(connection_->conn(),
                                            PQgetvalue(pk_result, r, 0),
                                            strlen(PQgetvalue(pk_result, r, 0)));
+        if (escaped == nullptr) {
+          PQclear(pk_result);
+          main_writer.DropStage();
+          InternalAdbcSetError(
+              error, "[hologres] Failed to escape primary key column: %s",
+              PQerrorMessage(connection_->conn()));
+          return ADBC_STATUS_INTERNAL;
+        }
         pk_columns += escaped;
         PQfreemem(escaped);
       }
@@ -857,9 +889,13 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
   }
 
   // Insert from stage using main connection
-  RAISE_STATUS(error, main_writer.InsertFromStage(escaped_table, escaped_field_list,
-                                                   escaped_type_list, ingest_.on_conflict,
-                                                   pk_columns));
+  auto insert_status = main_writer.InsertFromStage(escaped_table, escaped_field_list,
+                                                    escaped_type_list, ingest_.on_conflict,
+                                                    pk_columns);
+  if (!insert_status.ok()) {
+    main_writer.DropStage();
+    return insert_status.ToAdbc(error);
+  }
   RAISE_STATUS(error, main_writer.DropStage());
 
   return ADBC_STATUS_OK;

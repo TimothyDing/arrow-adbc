@@ -92,7 +92,7 @@ Status MakeStatus(PGresult* result, const char* format_string, Args&&... args) {
     } else if (std::strcmp(sqlstate, "42P01") == 0 ||
                std::strcmp(sqlstate, "42602") == 0) {
       code = ADBC_STATUS_NOT_FOUND;
-    } else if (std::strncmp(sqlstate, "42", 0) == 0) {
+    } else if (std::strncmp(sqlstate, "42", 2) == 0) {
       // Class 42 — Syntax Error or Access Rule Violation
       code = ADBC_STATUS_INVALID_ARGUMENT;
     }
