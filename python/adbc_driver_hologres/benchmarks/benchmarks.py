@@ -112,6 +112,30 @@ class HologresBenchmarkBase(abc.ABC):
             cursor.execute(f"SELECT * FROM {self.table}")
             cursor.fetch_df()
 
+    def time_pandas_adbc_arrow(self, row_count: int, data_type: str) -> None:
+        """Fetch data using ADBC with arrow COPY format and convert to Pandas."""
+        with self.conn.cursor() as cursor:
+            cursor.adbc_statement.set_options(
+                **{adbc_driver_hologres.StatementOptions.COPY_FORMAT.value: "arrow"}
+            )
+            cursor.execute(f"SELECT * FROM {self.table}")
+            cursor.fetch_df()
+            cursor.adbc_statement.set_options(
+                **{adbc_driver_hologres.StatementOptions.COPY_FORMAT.value: "binary"}
+            )
+
+    def time_pandas_adbc_arrow_lz4(self, row_count: int, data_type: str) -> None:
+        """Fetch data using ADBC with arrow_lz4 COPY format and convert to Pandas."""
+        with self.conn.cursor() as cursor:
+            cursor.adbc_statement.set_options(
+                **{adbc_driver_hologres.StatementOptions.COPY_FORMAT.value: "arrow_lz4"}
+            )
+            cursor.execute(f"SELECT * FROM {self.table}")
+            cursor.fetch_df()
+            cursor.adbc_statement.set_options(
+                **{adbc_driver_hologres.StatementOptions.COPY_FORMAT.value: "binary"}
+            )
+
     def time_pandas_asyncpg(self, row_count: int, data_type: str) -> None:
         """Fetch data using asyncpg and convert to Pandas DataFrame."""
         records = self.async_runner.run(
