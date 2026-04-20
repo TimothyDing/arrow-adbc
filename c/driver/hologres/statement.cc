@@ -42,6 +42,7 @@
 #include <libpq-fe.h>
 #include <nanoarrow/nanoarrow.hpp>
 
+#include "arrow_copy_reader.h"
 #include "bind_stream.h"
 #include "connection.h"
 #include "database.h"
@@ -555,6 +556,32 @@ AdbcStatusCode HologresStatement::ExecuteQuery(struct ArrowArrayStream* stream,
     return ADBC_STATUS_OK;
   }
 
+  // --- Arrow / Arrow_LZ4 COPY path ---
+  if (copy_format_ != CopyFormat::kBinary) {
+    // JSONB is not supported in arrow/arrow_lz4 COPY format
+    for (int64_t i = 0; i < root_type.n_children(); i++) {
+      if (root_type.child(i).type_id() == adbcpq::PostgresTypeId::kJsonb) {
+        InternalAdbcSetError(error,
+                             "[hologres] Column '%s' has type JSONB which is not supported "
+                             "in arrow/arrow_lz4 COPY format. Cast JSONB columns to TEXT "
+                             "(e.g., column::text).",
+                             root_type.child(i).field_name().c_str());
+        return ADBC_STATUS_NOT_IMPLEMENTED;
+      }
+    }
+
+    bool use_lz4 = (copy_format_ == CopyFormat::kArrowLz4);
+    std::string format_str = use_lz4 ? "arrow_lz4" : "arrow";
+
+    arrow_reader_ = std::make_shared<ArrowCopyReader>(connection_->conn(), use_lz4);
+    RAISE_STATUS(error, helper.ExecuteCopy(format_str));
+    arrow_reader_->result_ = helper.ReleaseResult();
+    arrow_reader_->ExportTo(stream);
+    if (rows_affected) *rows_affected = -1;
+    return ADBC_STATUS_OK;
+  }
+
+  // --- Standard Binary COPY path ---
   struct ArrowError na_error;
   reader_->copy_reader_ = std::make_unique<adbcpq::PostgresCopyStreamReader>();
   CHECK_NA(INTERNAL, reader_->copy_reader_->Init(root_type), error);
@@ -1057,6 +1084,18 @@ AdbcStatusCode HologresStatement::GetOption(const char* key, char* value, size_t
         result = "stage";
         break;
     }
+  } else if (std::strcmp(key, ADBC_HOLOGRES_OPTION_COPY_FORMAT) == 0) {
+    switch (copy_format_) {
+      case CopyFormat::kBinary:
+        result = "binary";
+        break;
+      case CopyFormat::kArrow:
+        result = "arrow";
+        break;
+      case CopyFormat::kArrowLz4:
+        result = "arrow_lz4";
+        break;
+    }
   } else {
     InternalAdbcSetError(error, "[hologres] Unknown statement option '%s'", key);
     return ADBC_STATUS_NOT_FOUND;
@@ -1223,6 +1262,18 @@ AdbcStatusCode HologresStatement::SetOption(const char* key, const char* value,
                            key);
       return ADBC_STATUS_INVALID_ARGUMENT;
     }
+  } else if (std::strcmp(key, ADBC_HOLOGRES_OPTION_COPY_FORMAT) == 0) {
+    if (std::strcmp(value, "binary") == 0) {
+      copy_format_ = CopyFormat::kBinary;
+    } else if (std::strcmp(value, "arrow") == 0) {
+      copy_format_ = CopyFormat::kArrow;
+    } else if (std::strcmp(value, "arrow_lz4") == 0) {
+      copy_format_ = CopyFormat::kArrowLz4;
+    } else {
+      InternalAdbcSetError(error, "[hologres] Invalid value '%s' for option '%s'", value,
+                           key);
+      return ADBC_STATUS_INVALID_ARGUMENT;
+    }
   } else {
     InternalAdbcSetError(error, "[hologres] Unknown statement option '%s'", key);
     return ADBC_STATUS_NOT_IMPLEMENTED;
@@ -1263,6 +1314,7 @@ void HologresStatement::ClearResult() {
   if (reader_) reader_->Release();
   reader_ = std::make_shared<TupleReader>(connection_->conn());
   reader_->batch_size_hint_bytes_ = batch_size_hint_bytes_;
+  arrow_reader_.reset();
 }
 
 }  // namespace adbchg

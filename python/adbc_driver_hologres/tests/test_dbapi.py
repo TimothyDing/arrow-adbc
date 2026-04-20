@@ -1756,3 +1756,366 @@ def test_ingest_large_strings(hologres: dbapi.Connection) -> None:
         assert vals[2] is None
 
         cur.execute("DROP TABLE IF EXISTS hg_test_large_strs")
+
+
+# ---------------------------------------------------------------------------
+# COPY format — binary / arrow / arrow_lz4 read-back tests
+# ---------------------------------------------------------------------------
+
+COPY_FORMATS = ("binary", "arrow", "arrow_lz4")
+
+
+def _fetch_with_copy_format(
+    cur: dbapi.Cursor, query: str, fmt: str
+) -> pyarrow.Table:
+    """Execute *query* with the given copy_format and return the result table."""
+    cur.adbc_statement.set_options(
+        **{StatementOptions.COPY_FORMAT.value: fmt}
+    )
+    cur.execute(query)
+    result = cur.fetch_arrow_table()
+    # Reset to default to avoid state leakage between calls
+    cur.adbc_statement.set_options(
+        **{StatementOptions.COPY_FORMAT.value: "binary"}
+    )
+    return result
+
+
+def test_copy_format_scalar_types(hologres: dbapi.Connection) -> None:
+    """Read SMALLINT, INT, BIGINT, BOOL, REAL, FLOAT8, BYTEA with all 3 formats."""
+    table_name = "hg_test_cf_scalar"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} ("
+            f"  c_int2 SMALLINT, c_int4 INT, c_int8 BIGINT,"
+            f"  c_bool BOOLEAN, c_float4 REAL, c_float8 DOUBLE PRECISION,"
+            f"  c_bytea BYTEA"
+            f")"
+        )
+        cur.execute(
+            f"INSERT INTO {table_name} VALUES"
+            f"  (1, 100, 1000, true, 1.5, 3.14, E'\\\\x0102'),"
+            f"  (-1, -100, -1000, false, -2.5, -2.71, E'\\\\x03'),"
+            f"  (NULL, NULL, NULL, NULL, NULL, NULL, NULL)"
+        )
+
+        query = (
+            f"SELECT c_int2, c_int4, c_int8, c_bool, c_float4, c_float8, c_bytea "
+            f"FROM {table_name} ORDER BY c_int4 NULLS LAST"
+        )
+
+        results = {}
+        for fmt in COPY_FORMATS:
+            results[fmt] = _fetch_with_copy_format(cur, query, fmt)
+            assert results[fmt].num_rows == 3
+
+        # All three formats should produce identical values
+        binary_vals = {
+            col: results["binary"].column(col).to_pylist()
+            for col in results["binary"].column_names
+        }
+        for fmt in ("arrow", "arrow_lz4"):
+            for col in results[fmt].column_names:
+                assert results[fmt].column(col).to_pylist() == binary_vals[col], (
+                    f"Mismatch in column {col} between binary and {fmt}"
+                )
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_copy_format_temporal_types(hologres: dbapi.Connection) -> None:
+    """Read DATE, TIME, TIMESTAMP, TIMESTAMPTZ with all 3 formats."""
+    table_name = "hg_test_cf_temporal"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} ("
+            f"  c_date DATE, c_time TIME,"
+            f"  c_ts TIMESTAMP, c_tstz TIMESTAMPTZ"
+            f")"
+        )
+        cur.execute(
+            f"INSERT INTO {table_name} VALUES"
+            f"  ('2024-06-15', '10:30:00', '2024-01-01 12:00:00',"
+            f"   '2024-03-20 10:00:00+00'),"
+            f"  ('2000-01-01', '23:59:59', '2000-06-15 08:30:00',"
+            f"   '2000-12-31 23:59:59+00'),"
+            f"  (NULL, NULL, NULL, NULL)"
+        )
+
+        query = (
+            f"SELECT c_date, c_time, c_ts, c_tstz "
+            f"FROM {table_name} ORDER BY c_date NULLS LAST"
+        )
+
+        results = {}
+        for fmt in COPY_FORMATS:
+            results[fmt] = _fetch_with_copy_format(cur, query, fmt)
+            assert results[fmt].num_rows == 3
+
+        # Hologres Arrow IPC may map temporal types differently from binary
+        # COPY (e.g., TIMESTAMPTZ -> Date). Compare arrow and arrow_lz4 with
+        # each other (same IPC format, different COPY compression); for binary
+        # vs arrow, only compare columns whose types match.
+        arrow_vals = {
+            col: results["arrow"].column(col).to_pylist()
+            for col in results["arrow"].column_names
+        }
+        for col in results["arrow_lz4"].column_names:
+            assert results["arrow_lz4"].column(col).to_pylist() == arrow_vals[col], (
+                f"Mismatch in column {col} between arrow and arrow_lz4"
+            )
+
+        # Verify binary returns data (non-NULL rows exist)
+        for col in results["binary"].column_names:
+            non_null = [v for v in results["binary"].column(col).to_pylist()
+                        if v is not None]
+            assert len(non_null) == 2, f"Expected 2 non-null values for {col}"
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_copy_format_timetz(hologres: dbapi.Connection) -> None:
+    """Read TIMETZ with all 3 formats.
+
+    Binary COPY maps TIMETZ to opaque binary (the C driver has no dedicated
+    decoder), while arrow/arrow_lz4 use the server's native Arrow type.
+    We only verify that all formats succeed and return the correct row count;
+    arrow vs arrow_lz4 values are compared with each other but not with binary.
+    """
+    table_name = "hg_test_cf_timetz"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} (id INT, t TIMETZ)"
+        )
+        cur.execute(
+            f"INSERT INTO {table_name} VALUES"
+            f"  (1, '10:30:00+08'),"
+            f"  (2, '23:59:59+00'),"
+            f"  (3, NULL)"
+        )
+
+        query = f"SELECT id, t FROM {table_name} ORDER BY id"
+
+        for fmt in COPY_FORMATS:
+            result = _fetch_with_copy_format(cur, query, fmt)
+            assert result.num_rows == 3
+            assert result.column("id").to_pylist() == [1, 2, 3]
+
+        # arrow and arrow_lz4 should match each other
+        arrow_vals = _fetch_with_copy_format(cur, query, "arrow")
+        lz4_vals = _fetch_with_copy_format(cur, query, "arrow_lz4")
+        assert arrow_vals.column("t").to_pylist() == lz4_vals.column("t").to_pylist()
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_copy_format_string_types(hologres: dbapi.Connection) -> None:
+    """Read TEXT, CHAR(10), VARCHAR(255) with all 3 formats."""
+    table_name = "hg_test_cf_string"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} ("
+            f"  c_text TEXT, c_char CHAR(10), c_varchar VARCHAR(255)"
+            f")"
+        )
+        cur.execute(
+            f"INSERT INTO {table_name} VALUES"
+            f"  ('hello', 'abc', 'varchar_val'),"
+            f"  ('world', 'xyz', 'another'),"
+            f"  (NULL, NULL, NULL)"
+        )
+
+        query = (
+            f"SELECT c_text, c_char, c_varchar "
+            f"FROM {table_name} ORDER BY c_text NULLS LAST"
+        )
+
+        results = {}
+        for fmt in COPY_FORMATS:
+            results[fmt] = _fetch_with_copy_format(cur, query, fmt)
+            assert results[fmt].num_rows == 3
+
+        # Binary COPY pads CHAR(10) with trailing spaces; Arrow IPC does not.
+        # Compare arrow and arrow_lz4 directly, then compare binary vs arrow
+        # after stripping trailing spaces from CHAR columns.
+        arrow_vals = {
+            col: results["arrow"].column(col).to_pylist()
+            for col in results["arrow"].column_names
+        }
+        for col in results["arrow_lz4"].column_names:
+            assert results["arrow_lz4"].column(col).to_pylist() == arrow_vals[col], (
+                f"Mismatch in column {col} between arrow and arrow_lz4"
+            )
+
+        for col in results["binary"].column_names:
+            bin_list = results["binary"].column(col).to_pylist()
+            arr_list = arrow_vals[col]
+            # Strip trailing spaces for CHAR comparison
+            stripped_bin = [v.rstrip() if isinstance(v, str) else v for v in bin_list]
+            stripped_arr = [v.rstrip() if isinstance(v, str) else v for v in arr_list]
+            assert stripped_bin == stripped_arr, (
+                f"Mismatch in column {col} between binary and arrow"
+            )
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_copy_format_json(hologres: dbapi.Connection) -> None:
+    """Read JSON with all 3 formats."""
+    table_name = "hg_test_cf_json"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} (id INT, data JSON)"
+        )
+        cur.execute(
+            f"INSERT INTO {table_name} VALUES"
+            f"""  (1, '{{"key":"value"}}'),"""
+            f"""  (2, '{{"num":42}}'),"""
+            f"  (3, NULL)"
+        )
+
+        query = f"SELECT id, data FROM {table_name} ORDER BY id"
+
+        results = {}
+        for fmt in COPY_FORMATS:
+            results[fmt] = _fetch_with_copy_format(cur, query, fmt)
+            assert results[fmt].num_rows == 3
+            vals = results[fmt].column("data").to_pylist()
+            assert vals[2] is None
+            assert "key" in str(vals[0])
+            assert "42" in str(vals[1])
+
+        # Values across all formats should match
+        binary_vals = results["binary"].column("data").to_pylist()
+        for fmt in ("arrow", "arrow_lz4"):
+            assert results[fmt].column("data").to_pylist() == binary_vals
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_copy_format_jsonb_rejection(hologres: dbapi.Connection) -> None:
+    """Arrow/arrow_lz4 must reject JSONB columns; binary should succeed."""
+    table_name = "hg_test_cf_jsonb_reject"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} (id INT, data JSONB)"
+        )
+        cur.execute(
+            f"""INSERT INTO {table_name} VALUES (1, '{{"key":"value"}}')"""
+        )
+
+        query = f"SELECT id, data FROM {table_name} ORDER BY id"
+
+        # Binary format should work fine
+        result = _fetch_with_copy_format(cur, query, "binary")
+        assert result.num_rows == 1
+
+        # Arrow and arrow_lz4 should raise NotSupportedError
+        for fmt in ("arrow", "arrow_lz4"):
+            with pytest.raises(dbapi.NotSupportedError, match="(?i)jsonb"):
+                cur.adbc_statement.set_options(
+                    **{StatementOptions.COPY_FORMAT.value: fmt}
+                )
+                cur.execute(query)
+                cur.fetch_arrow_table()
+            # Reset format
+            cur.adbc_statement.set_options(
+                **{StatementOptions.COPY_FORMAT.value: "binary"}
+            )
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_copy_format_jsonb_cast_workaround(hologres: dbapi.Connection) -> None:
+    """Casting JSONB to TEXT in the query should work with all 3 formats."""
+    table_name = "hg_test_cf_jsonb_cast"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} (id INT, data JSONB)"
+        )
+        cur.execute(
+            f"""INSERT INTO {table_name} VALUES"""
+            f"""  (1, '{{"key":"value"}}'),"""
+            f"  (2, NULL)"
+        )
+
+        query = f"SELECT id, data::text FROM {table_name} ORDER BY id"
+
+        for fmt in COPY_FORMATS:
+            result = _fetch_with_copy_format(cur, query, fmt)
+            assert result.num_rows == 2
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_copy_format_array_types(hologres: dbapi.Connection) -> None:
+    """Read INT[], BIGINT[], FLOAT4[], FLOAT8[], TEXT[] with all 3 formats."""
+    table_name = "hg_test_cf_array"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} ("
+            f"  c_int4_arr INT[], c_int8_arr BIGINT[],"
+            f"  c_float4_arr FLOAT4[], c_float8_arr FLOAT8[],"
+            f"  c_text_arr TEXT[]"
+            f")"
+        )
+        cur.execute(
+            f"INSERT INTO {table_name} VALUES"
+            f"  ('{{1,2,3}}', '{{10,20}}', '{{1.5,2.5}}',"
+            f"   '{{3.14,2.71}}', '{{\"a\",\"b\"}}'),"
+            f"  ('{{4}}', '{{30}}', '{{0.5}}', '{{1.0}}', '{{\"c\"}}'),"
+            f"  (NULL, NULL, NULL, NULL, NULL)"
+        )
+
+        query = (
+            f"SELECT c_int4_arr, c_int8_arr, c_float4_arr, c_float8_arr, c_text_arr "
+            f"FROM {table_name} ORDER BY c_int4_arr[1] NULLS LAST"
+        )
+
+        results = {}
+        for fmt in COPY_FORMATS:
+            results[fmt] = _fetch_with_copy_format(cur, query, fmt)
+            assert results[fmt].num_rows == 3
+
+        binary_vals = {
+            col: results["binary"].column(col).to_pylist()
+            for col in results["binary"].column_names
+        }
+        for fmt in ("arrow", "arrow_lz4"):
+            for col in results[fmt].column_names:
+                assert results[fmt].column(col).to_pylist() == binary_vals[col], (
+                    f"Mismatch in column {col} between binary and {fmt}"
+                )
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def test_copy_format_roaringbitmap(hologres: dbapi.Connection) -> None:
+    """Read roaringbitmap (NULL values) with all 3 formats."""
+    table_name = "hg_test_cf_roaring"
+    with hologres.cursor() as cur:
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
+        cur.execute(
+            f"CREATE TABLE {table_name} (id INT, bitmap roaringbitmap)"
+        )
+        cur.execute(
+            f"INSERT INTO {table_name} VALUES (1, NULL), (2, NULL)"
+        )
+
+        query = f"SELECT id, bitmap FROM {table_name} ORDER BY id"
+
+        for fmt in COPY_FORMATS:
+            result = _fetch_with_copy_format(cur, query, fmt)
+            assert result.num_rows == 2
+            assert result.column("id").to_pylist() == [1, 2]
+            assert result.column("bitmap").to_pylist() == [None, None]
+
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")

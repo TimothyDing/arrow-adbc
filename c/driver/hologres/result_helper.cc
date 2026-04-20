@@ -111,13 +111,13 @@ Status PqResultHelper::Execute(const std::vector<std::string>& params,
   return Status::Ok();
 }
 
-Status PqResultHelper::ExecuteCopy() {
+Status PqResultHelper::ExecuteCopy(const std::string& format) {
   // Remove trailing semicolon(s) from the query before feeding it into COPY
   while (!query_.empty() && query_.back() == ';') {
     query_.pop_back();
   }
 
-  std::string copy_query = "COPY (" + query_ + ") TO STDOUT (FORMAT binary)";
+  std::string copy_query = "COPY (" + query_ + ") TO STDOUT (FORMAT " + format + ")";
   ClearResult();
   result_ = PQexecParams(conn_, copy_query.c_str(), /*nParams=*/0,
                          /*paramTypes=*/nullptr, /*paramValues=*/nullptr,

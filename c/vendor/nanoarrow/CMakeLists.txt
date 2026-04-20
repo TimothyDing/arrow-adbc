@@ -53,6 +53,16 @@ if(NANOARROW_IPC AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/ipc/writer.c")
     "${CMAKE_CURRENT_LIST_DIR}"
     "${CMAKE_CURRENT_LIST_DIR}/ipc"
   )
+
+  # Enable LZ4 frame decompression for IPC body buffers.
+  # Hologres sends IPC RecordBatch messages with LZ4_FRAME body compression.
+  find_package(PkgConfig)
+  pkg_check_modules(LZ4 liblz4)
+  if(LZ4_FOUND)
+    target_compile_definitions(nanoarrow PRIVATE NANOARROW_IPC_WITH_LZ4)
+    target_include_directories(nanoarrow PRIVATE ${LZ4_INCLUDE_DIRS})
+    target_link_libraries(nanoarrow PRIVATE ${LZ4_LINK_LIBRARIES})
+  endif()
 endif()
 
 target_include_directories(nanoarrow PUBLIC "${CMAKE_CURRENT_LIST_DIR}/..")

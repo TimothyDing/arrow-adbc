@@ -139,7 +139,7 @@ class PqResultHelper {
   Status DescribePrepared();
   Status Execute(const std::vector<std::string>& params = {},
                  PostgresType* param_types = nullptr);
-  Status ExecuteCopy();
+  Status ExecuteCopy(const std::string& format = "binary");
   Status ResolveParamTypes(PostgresTypeResolver& type_resolver,
                            PostgresType* param_types);
   Status ResolveOutputTypes(PostgresTypeResolver& type_resolver,

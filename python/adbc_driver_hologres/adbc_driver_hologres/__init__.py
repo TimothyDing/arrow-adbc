@@ -67,6 +67,9 @@ class StatementOptions(enum.Enum):
     #: Ingestion method: ``copy`` or ``stage``.
     INGEST_MODE = "adbc.hologres.ingest_mode"
 
+    #: COPY TO STDOUT format: ``binary``, ``arrow``, or ``arrow_lz4``.
+    COPY_FORMAT = "adbc.hologres.copy_format"
+
 
 def connect(
     uri: str,

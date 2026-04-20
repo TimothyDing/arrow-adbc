@@ -58,8 +58,44 @@ ArrowIpcDecompressFunction ArrowIpcGetZstdDecompressionFunction(void) {
 #include <lz4.h>
 #include <lz4frame.h>
 
+// LZ4 Frame magic number (little-endian): 0x184D2204
+static const uint8_t kLZ4FrameMagic[4] = {0x04, 0x22, 0x4D, 0x18};
+
+static ArrowErrorCode ArrowIpcDecompressLZ4Block(struct ArrowBufferView src, uint8_t* dst,
+                                                 int64_t dst_size,
+                                                 struct ArrowError* error) {
+  int result =
+      LZ4_decompress_safe((const char*)src.data.data, (char*)dst,
+                          (int)src.size_bytes, (int)dst_size);
+  if (result < 0) {
+    ArrowErrorSet(error,
+                  "LZ4_decompress_safe([buffer with %" PRId64
+                  " bytes] -> [buffer with %" PRId64 " bytes]) failed with code %d",
+                  src.size_bytes, dst_size, result);
+    return EIO;
+  }
+
+  if ((int64_t)result != dst_size) {
+    ArrowErrorSet(error,
+                  "Expected decompressed size of %" PRId64 " bytes but got %" PRId64
+                  " bytes",
+                  dst_size, (int64_t)result);
+    return EIO;
+  }
+
+  return NANOARROW_OK;
+}
+
 static ArrowErrorCode ArrowIpcDecompressLZ4(struct ArrowBufferView src, uint8_t* dst,
                                             int64_t dst_size, struct ArrowError* error) {
+  // Some Arrow implementations (notably Hologres/Arrow Java) report LZ4_FRAME
+  // compression but actually send LZ4 block-compressed data. Detect the format
+  // by checking for the LZ4 frame magic number and fall back to block API.
+  if (src.size_bytes < 4 ||
+      memcmp(src.data.data, kLZ4FrameMagic, 4) != 0) {
+    return ArrowIpcDecompressLZ4Block(src, dst, dst_size, error);
+  }
+
   LZ4F_errorCode_t ret;
   LZ4F_decompressionContext_t ctx = NULL;
 

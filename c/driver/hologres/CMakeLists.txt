@@ -24,10 +24,12 @@ if(WIN32)
 else()
   find_package(PkgConfig)
   pkg_check_modules(LIBPQ REQUIRED libpq)
+  pkg_check_modules(LZ4 REQUIRED liblz4)
 endif()
 
 add_arrow_lib(adbc_driver_hologres
               SOURCES
+              arrow_copy_reader.cc
               connection.cc
               database.cc
               error.cc
@@ -49,8 +51,10 @@ add_arrow_lib(adbc_driver_hologres
               adbc_driver_common
               adbc_driver_framework
               ${LIBPQ_LINK_LIBRARIES}
+              ${LZ4_LINK_LIBRARIES}
               STATIC_LINK_LIBS
               ${LIBPQ_LINK_LIBRARIES}
+              ${LZ4_LINK_LIBRARIES}
               adbc_driver_common
               adbc_driver_framework
               ${LIBPQ_STATIC_LIBRARIES})
@@ -62,6 +66,7 @@ foreach(LIB_TARGET ${ADBC_LIBRARIES})
                              PRIVATE ${REPOSITORY_ROOT}/c/
                                      ${REPOSITORY_ROOT}/c/include/
                                      ${LIBPQ_INCLUDE_DIRS}
+                                     ${LZ4_INCLUDE_DIRS}
                                      ${REPOSITORY_ROOT}/c/driver
                                      ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
   )

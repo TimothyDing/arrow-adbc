@@ -35,15 +35,24 @@
   "adbc.hologres.batch_size_hint_bytes"
 
 #define ADBC_HOLOGRES_OPTION_USE_COPY "adbc.hologres.use_copy"
+#define ADBC_HOLOGRES_OPTION_COPY_FORMAT "adbc.hologres.copy_format"
 
 // Hologres-specific options
 #define ADBC_HOLOGRES_OPTION_ON_CONFLICT "adbc.hologres.on_conflict"
 #define ADBC_HOLOGRES_OPTION_INGEST_MODE "adbc.hologres.ingest_mode"
 
 namespace adbchg {
+class ArrowCopyReader;
 class HologresConnection;
 
 constexpr static int64_t kDefaultBatchSizeHintBytes = 16777216;
+
+/// COPY TO STDOUT format for reading data from Hologres
+enum class CopyFormat {
+  kBinary,    // FORMAT binary (default, standard PG binary COPY)
+  kArrow,     // FORMAT arrow (Arrow IPC wrapped in PG COPY framing)
+  kArrowLz4,  // FORMAT arrow_lz4 (LZ4-compressed Arrow IPC)
+};
 
 /// Ingest method for Hologres bulk ingestion
 enum class HologresIngestMethod {
@@ -175,6 +184,7 @@ class HologresStatement {
 
   // Options
   bool use_copy_;
+  CopyFormat copy_format_ = CopyFormat::kBinary;
 
   struct {
     std::string db_schema;
@@ -186,6 +196,7 @@ class HologresStatement {
   } ingest_;
 
   std::shared_ptr<TupleReader> reader_;
+  std::shared_ptr<ArrowCopyReader> arrow_reader_;
   int64_t batch_size_hint_bytes_;
 };
 
