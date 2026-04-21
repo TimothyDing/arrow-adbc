@@ -166,7 +166,7 @@ class HologresOneColumnSuite(HologresBenchmarkBase):
     ]
 
     param_data = {
-        "row_count": [10_000, 100_000, 1_000_000],
+        "row_count": [10_000, 100_000, 1_000_000, 10_000_000],
         "data_type": ["INT", "BIGINT", "FLOAT", "DOUBLE PRECISION"],
     }
 
@@ -270,7 +270,7 @@ class HologresMultiColumnSuite(HologresBenchmarkBase):
     ]
 
     param_data = {
-        "row_count": [10_000, 100_000, 1_000_000],
+        "row_count": [10_000, 100_000, 1_000_000, 10_000_000],
         "data_type": ["INT", "BIGINT", "FLOAT", "DOUBLE PRECISION"],
     }
 
