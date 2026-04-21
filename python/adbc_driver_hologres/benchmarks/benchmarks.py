@@ -167,7 +167,7 @@ class HologresOneColumnSuite(HologresBenchmarkBase):
 
     param_data = {
         "row_count": [10_000, 100_000, 1_000_000, 10_000_000],
-        "data_type": ["INT", "BIGINT", "FLOAT", "DOUBLE PRECISION"],
+        "data_type": ["INT", "BIGINT", "FLOAT", "DOUBLE PRECISION", "TEXT", "TEXT[]"],
     }
 
     param_names = list(param_data.keys())
@@ -196,16 +196,13 @@ class HologresOneColumnSuite(HologresBenchmarkBase):
                                     data_type=data_type,
                                 )
                             )
-                        except psycopg.Error as e:
-                            # GENERATE_SERIES may not be supported on all
-                            # Hologres versions
-                            if "GENERATE_SERIES" in str(e):
-                                # Fall back to manual insertion via ADBC
-                                self._setup_with_adbc_ingest(
-                                    table_name, row_count, data_type
-                                )
-                            else:
-                                raise
+                        except psycopg.Error:
+                            # GENERATE_SERIES or type cast may fail
+                            # (e.g. TEXT[] can't be cast from integer)
+                            self._setup_with_adbc_ingest(
+                                table_name, row_count, data_type
+                            )
+                            break
 
     def _setup_with_adbc_ingest(
         self, table_name: str, row_count: int, data_type: str
@@ -232,6 +229,19 @@ class HologresOneColumnSuite(HologresBenchmarkBase):
                     arr = pyarrow.array(
                         np.arange(row_count, dtype=np.float32)
                     )
+                elif data_type == "TEXT":
+                    arr = pyarrow.array(
+                        [f"row_{i}" for i in range(row_count)]
+                    )
+                elif data_type == "TEXT[]":
+                    values = pyarrow.array(
+                        [f"v{i}" for i in range(row_count * 3)]
+                    )
+                    offsets = pyarrow.array(
+                        range(0, row_count * 3 + 1, 3),
+                        type=pyarrow.int32(),
+                    )
+                    arr = pyarrow.ListArray.from_arrays(offsets, values)
                 else:  # DOUBLE PRECISION
                     arr = pyarrow.array(
                         np.arange(row_count, dtype=np.float64)
@@ -243,7 +253,10 @@ class HologresOneColumnSuite(HologresBenchmarkBase):
             conn.close()
 
     def _make_table_name(self, row_count: int, data_type: str) -> str:
-        return f"holo_bench_{row_count}_{data_type.replace(' ', '_')}".lower()
+        return (
+            f"holo_bench_{row_count}_"
+            f"{data_type.replace(' ', '_').replace('[]', '_array')}"
+        ).lower()
 
 
 class HologresMultiColumnSuite(HologresBenchmarkBase):
@@ -271,7 +284,7 @@ class HologresMultiColumnSuite(HologresBenchmarkBase):
 
     param_data = {
         "row_count": [10_000, 100_000, 1_000_000, 10_000_000],
-        "data_type": ["INT", "BIGINT", "FLOAT", "DOUBLE PRECISION"],
+        "data_type": ["INT", "BIGINT", "FLOAT", "DOUBLE PRECISION", "TEXT", "TEXT[]"],
     }
 
     param_names = list(param_data.keys())
@@ -296,13 +309,12 @@ class HologresMultiColumnSuite(HologresBenchmarkBase):
                                     data_type=data_type,
                                 )
                             )
-                        except psycopg.Error as e:
-                            if "GENERATE_SERIES" in str(e):
-                                self._setup_with_adbc_ingest(
-                                    table_name, row_count, data_type
-                                )
-                            else:
-                                raise
+                        except psycopg.Error:
+                            # GENERATE_SERIES or type cast may fail
+                            self._setup_with_adbc_ingest(
+                                table_name, row_count, data_type
+                            )
+                            break
 
     def _setup_with_adbc_ingest(
         self, table_name: str, row_count: int, data_type: str
@@ -330,6 +342,19 @@ class HologresMultiColumnSuite(HologresBenchmarkBase):
                     arr = pyarrow.array(
                         np.arange(row_count, dtype=np.float32)
                     )
+                elif data_type == "TEXT":
+                    arr = pyarrow.array(
+                        [f"row_{i}" for i in range(row_count)]
+                    )
+                elif data_type == "TEXT[]":
+                    values = pyarrow.array(
+                        [f"v{i}" for i in range(row_count * 3)]
+                    )
+                    offsets = pyarrow.array(
+                        range(0, row_count * 3 + 1, 3),
+                        type=pyarrow.int32(),
+                    )
+                    arr = pyarrow.ListArray.from_arrays(offsets, values)
                 else:  # DOUBLE PRECISION
                     arr = pyarrow.array(
                         np.arange(row_count, dtype=np.float64)
@@ -343,7 +368,10 @@ class HologresMultiColumnSuite(HologresBenchmarkBase):
             conn.close()
 
     def _make_table_name(self, row_count: int, data_type: str) -> str:
-        return f"holo_bench_multi_{row_count}_{data_type.replace(' ', '_')}".lower()
+        return (
+            f"holo_bench_multi_{row_count}_"
+            f"{data_type.replace(' ', '_').replace('[]', '_array')}"
+        ).lower()
 
 
 class HologresIngestSuite:
