@@ -30,6 +30,7 @@ Hologres has specific limitations that these benchmarks account for:
 
 import abc
 import asyncio
+import gc
 import itertools
 import os
 
@@ -400,10 +401,33 @@ class HologresIngestSuite:
     param_names = list(param_data.keys())
     params = list(param_data.values())
 
+    def setup_cache(self) -> None:
+        """Create all target tables once before any benchmarks run."""
+        uri = os.environ.get("ADBC_HOLOGRES_TEST_URI")
+        if not uri:
+            return
+
+        with psycopg.connect(uri, autocommit=True) as conn:
+            with conn.cursor() as cursor:
+                for (row_count,) in itertools.product(*self.params):
+                    table_base = f"holo_ingest_bench_{row_count}"
+                    for mode in self._MODES:
+                        table_name = f"{table_base}_{mode}"
+                        cursor.execute(
+                            f"DROP TABLE IF EXISTS {table_name}"
+                        )
+                        cursor.execute(
+                            f"CREATE TABLE {table_name} "
+                            f"(id BIGINT PRIMARY KEY, "
+                            f"value DOUBLE PRECISION, name TEXT)"
+                        )
+
     def setup(self, row_count: int) -> None:
         self.uri = os.environ.get("ADBC_HOLOGRES_TEST_URI")
         if not self.uri:
             raise NotImplementedError("ADBC_HOLOGRES_TEST_URI not set")
+
+        gc.collect()
 
         self.row_count = row_count
         self.table_base = f"holo_ingest_bench_{row_count}"
@@ -423,18 +447,6 @@ class HologresIngestSuite:
             }
         )
 
-        # Pre-create all target tables (outside timed portion)
-        with psycopg.connect(self.uri, autocommit=True) as pg_conn:
-            with pg_conn.cursor() as cursor:
-                for mode in self._MODES:
-                    table_name = f"{self.table_base}_{mode}"
-                    cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
-                    cursor.execute(
-                        f"CREATE TABLE {table_name} "
-                        f"(id BIGINT PRIMARY KEY, value DOUBLE PRECISION, "
-                        f"name TEXT)"
-                    )
-
         self._adbc_conn = adbc_driver_hologres.dbapi.connect(
             self.uri, autocommit=True
         )
@@ -450,17 +462,11 @@ class HologresIngestSuite:
         ]
 
     def teardown(self, row_count: int) -> None:
-        if not hasattr(self, "uri") or not self.uri:
-            return
-
         if hasattr(self, "_adbc_conn"):
             self._adbc_conn.close()
-
-        with psycopg.connect(self.uri, autocommit=True) as conn:
-            with conn.cursor() as cursor:
-                for mode in self._MODES:
-                    table_name = f"{self.table_base}_{mode}"
-                    cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+        if hasattr(self, "test_data"):
+            del self.test_data
+        gc.collect()
 
     def time_ingest_adbc(self, row_count: int) -> None:
         """Benchmark ADBC bulk ingest without ON_CONFLICT."""
@@ -615,10 +621,37 @@ class HologresVectorIngestSuite:
     param_names = list(param_data.keys())
     params = list(param_data.values())
 
+    def setup_cache(self) -> None:
+        """Create all target tables once before any benchmarks run."""
+        uri = os.environ.get("ADBC_HOLOGRES_TEST_URI")
+        if not uri:
+            return
+
+        with psycopg.connect(uri, autocommit=True) as conn:
+            with conn.cursor() as cursor:
+                for vector_dim, row_count in itertools.product(
+                    *self.params
+                ):
+                    table_base = (
+                        f"holo_vec_ingest_{vector_dim}d_{row_count}"
+                    )
+                    for mode in self._MODES:
+                        table_name = f"{table_base}_{mode}"
+                        cursor.execute(
+                            f"DROP TABLE IF EXISTS {table_name}"
+                        )
+                        cursor.execute(
+                            f"CREATE TABLE {table_name} "
+                            f"(id BIGINT PRIMARY KEY, "
+                            f"embedding FLOAT4[])"
+                        )
+
     def setup(self, vector_dim: int, row_count: int) -> None:
         self.uri = os.environ.get("ADBC_HOLOGRES_TEST_URI")
         if not self.uri:
             raise NotImplementedError("ADBC_HOLOGRES_TEST_URI not set")
+
+        gc.collect()
 
         self.vector_dim = vector_dim
         self.row_count = row_count
@@ -645,17 +678,6 @@ class HologresVectorIngestSuite:
             }
         )
 
-        # Pre-create all target tables (outside timed portion)
-        with psycopg.connect(self.uri, autocommit=True) as pg_conn:
-            with pg_conn.cursor() as cursor:
-                for mode in self._MODES:
-                    table_name = f"{self.table_base}_{mode}"
-                    cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
-                    cursor.execute(
-                        f"CREATE TABLE {table_name} "
-                        f"(id BIGINT PRIMARY KEY, embedding FLOAT4[])"
-                    )
-
         self._adbc_conn = adbc_driver_hologres.dbapi.connect(
             self.uri, autocommit=True
         )
@@ -675,17 +697,11 @@ class HologresVectorIngestSuite:
             self._psycopg2_data = None
 
     def teardown(self, vector_dim: int, row_count: int) -> None:
-        if not hasattr(self, "uri") or not self.uri:
-            return
-
         if hasattr(self, "_adbc_conn"):
             self._adbc_conn.close()
-
-        with psycopg.connect(self.uri, autocommit=True) as conn:
-            with conn.cursor() as cursor:
-                for mode in self._MODES:
-                    table_name = f"{self.table_base}_{mode}"
-                    cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+        if hasattr(self, "test_data"):
+            del self.test_data
+        gc.collect()
 
     def time_ingest_adbc(self, vector_dim: int, row_count: int) -> None:
         """Benchmark ADBC COPY ingest of vector data."""
