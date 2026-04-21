@@ -79,6 +79,9 @@ class HologresConnection {
   }
   bool autocommit() const { return autocommit_; }
 
+  // Fetch the current schema via SELECT CURRENT_SCHEMA()
+  AdbcStatusCode GetCurrentSchema(std::string* out, struct AdbcError* error);
+
   const std::shared_ptr<HologresDatabase>& database() const { return database_; }
 
  private:

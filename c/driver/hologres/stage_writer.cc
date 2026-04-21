@@ -428,7 +428,9 @@ HologresStageWriter::HologresStageWriter(StageConnection* conn,
                                          const HologresStageConfig& config)
     : conn_(conn), config_(config) {}
 
-HologresStageWriter::~HologresStageWriter() {
+HologresStageWriter::~HologresStageWriter() { JoinUploadThreads(); }
+
+void HologresStageWriter::JoinUploadThreads() {
   for (auto& thread : upload_threads_) {
     if (thread.joinable()) {
       thread.join();
@@ -539,25 +541,27 @@ Status HologresStageWriter::SerializeArrayToIpcBuffer(
     std::vector<uint8_t>* out_buffer, struct ArrowError* error) {
   struct ArrowBuffer ipc_buffer;
   ArrowBufferInit(&ipc_buffer);
+  auto buffer_guard = [&]() { ArrowBufferReset(&ipc_buffer); };
 
   struct ArrowIpcOutputStream output_stream;
   int result = ArrowIpcOutputStreamInitBuffer(&output_stream, &ipc_buffer);
   if (result != NANOARROW_OK) {
-    ArrowBufferReset(&ipc_buffer);
+    buffer_guard();
     return Status::IO("[hologres] Failed to init IPC output stream");
   }
 
   struct ArrowIpcWriter writer;
   result = ArrowIpcWriterInit(&writer, &output_stream);
   if (result != NANOARROW_OK) {
-    ArrowBufferReset(&ipc_buffer);
+    buffer_guard();
     return Status::IO("[hologres] Failed to init IPC writer");
   }
+  auto writer_guard = [&]() { ArrowIpcWriterReset(&writer); };
 
   result = ArrowIpcWriterWriteSchema(&writer, schema, error);
   if (result != NANOARROW_OK) {
-    ArrowIpcWriterReset(&writer);
-    ArrowBufferReset(&ipc_buffer);
+    writer_guard();
+    buffer_guard();
     return Status::IO("[hologres] Failed to write schema: ", error->message);
   }
 
@@ -565,40 +569,43 @@ Status HologresStageWriter::SerializeArrayToIpcBuffer(
   ArrowArrayViewInitFromType(&array_view, NANOARROW_TYPE_UNINITIALIZED);
   result = ArrowArrayViewInitFromSchema(&array_view, schema, error);
   if (result != NANOARROW_OK) {
-    ArrowIpcWriterReset(&writer);
-    ArrowBufferReset(&ipc_buffer);
+    writer_guard();
+    buffer_guard();
     return Status::IO("[hologres] Failed to init array view: ", error->message);
   }
+  auto view_guard = [&]() { ArrowArrayViewReset(&array_view); };
 
   result = ArrowArrayViewSetArray(&array_view, array, error);
   if (result != NANOARROW_OK) {
-    ArrowArrayViewReset(&array_view);
-    ArrowIpcWriterReset(&writer);
-    ArrowBufferReset(&ipc_buffer);
+    view_guard();
+    writer_guard();
+    buffer_guard();
     return Status::IO("[hologres] Failed to set array view: ", error->message);
   }
 
   result = ArrowIpcWriterWriteArrayView(&writer, &array_view, error);
   if (result != NANOARROW_OK) {
-    ArrowArrayViewReset(&array_view);
-    ArrowIpcWriterReset(&writer);
-    ArrowBufferReset(&ipc_buffer);
+    view_guard();
+    writer_guard();
+    buffer_guard();
     return Status::IO("[hologres] Failed to write array: ", error->message);
   }
 
   result = ArrowIpcWriterWriteArrayView(&writer, nullptr, error);
   if (result != NANOARROW_OK) {
-    ArrowArrayViewReset(&array_view);
-    ArrowIpcWriterReset(&writer);
-    ArrowBufferReset(&ipc_buffer);
+    view_guard();
+    writer_guard();
+    buffer_guard();
     return Status::IO("[hologres] Failed to write EOS marker: ", error->message);
   }
 
-  out_buffer->assign(ipc_buffer.data, ipc_buffer.data + ipc_buffer.size_bytes);
+  view_guard();
+  writer_guard();
 
-  ArrowArrayViewReset(&array_view);
-  ArrowIpcWriterReset(&writer);
-  ArrowBufferReset(&ipc_buffer);
+  // Transfer ownership: resize output and move data to avoid a full copy
+  out_buffer->resize(ipc_buffer.size_bytes);
+  std::memcpy(out_buffer->data(), ipc_buffer.data, ipc_buffer.size_bytes);
+  buffer_guard();
 
   return Status::Ok();
 }
@@ -620,9 +627,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
   int result = ArrowArrayStreamGetSchema(stream, schema.get(), &na_error);
   if (result != NANOARROW_OK) {
     buffer_queue_->Close();
-    for (auto& thread : upload_threads_) {
-      if (thread.joinable()) thread.join();
-    }
+    JoinUploadThreads();
     return Status::IO("[hologres] Failed to get schema from stream: ",
                       na_error.message);
   }
@@ -647,9 +652,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
       result = ConvertFixedSizeListSchema(schema.get(), fsl_schema.get(), &na_error);
       if (result != NANOARROW_OK) {
         buffer_queue_->Close();
-        for (auto& thread : upload_threads_) {
-          if (thread.joinable()) thread.join();
-        }
+        JoinUploadThreads();
         return Status::IO(
             "[hologres] Failed to convert FIXED_SIZE_LIST schema for stage: ",
             na_error.message);
@@ -658,9 +661,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
                                       stage_conversions, &na_error);
       if (result != NANOARROW_OK) {
         buffer_queue_->Close();
-        for (auto& thread : upload_threads_) {
-          if (thread.joinable()) thread.join();
-        }
+        JoinUploadThreads();
         return Status::IO(
             "[hologres] Failed to convert stage type schema: ", na_error.message);
       }
@@ -668,9 +669,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
       result = ConvertFixedSizeListSchema(schema.get(), ipc_schema.get(), &na_error);
       if (result != NANOARROW_OK) {
         buffer_queue_->Close();
-        for (auto& thread : upload_threads_) {
-          if (thread.joinable()) thread.join();
-        }
+        JoinUploadThreads();
         return Status::IO(
             "[hologres] Failed to convert FIXED_SIZE_LIST schema for stage: ",
             na_error.message);
@@ -680,9 +679,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
                                       stage_conversions, &na_error);
       if (result != NANOARROW_OK) {
         buffer_queue_->Close();
-        for (auto& thread : upload_threads_) {
-          if (thread.joinable()) thread.join();
-        }
+        JoinUploadThreads();
         return Status::IO(
             "[hologres] Failed to convert stage type schema: ", na_error.message);
       }
@@ -698,9 +695,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
     result = ArrowArrayStreamGetNext(stream, array.get(), &na_error);
     if (result != NANOARROW_OK) {
       buffer_queue_->Close();
-      for (auto& thread : upload_threads_) {
-        if (thread.joinable()) thread.join();
-      }
+      JoinUploadThreads();
       return Status::IO("[hologres] Failed to get array from stream: ",
                         na_error.message);
     }
@@ -713,9 +708,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
       result = ConvertFixedSizeListArrays(array.get(), fsl_fields, &na_error);
       if (result != NANOARROW_OK) {
         buffer_queue_->Close();
-        for (auto& thread : upload_threads_) {
-          if (thread.joinable()) thread.join();
-        }
+        JoinUploadThreads();
         return Status::IO(
             "[hologres] Failed to convert FIXED_SIZE_LIST arrays for stage: ",
             na_error.message);
@@ -729,9 +722,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
                                       &stage_states, &na_error);
       if (result != NANOARROW_OK) {
         buffer_queue_->Close();
-        for (auto& thread : upload_threads_) {
-          if (thread.joinable()) thread.join();
-        }
+        JoinUploadThreads();
         return Status::IO(
             "[hologres] Failed to convert stage type arrays: ", na_error.message);
       }
@@ -937,9 +928,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
           RestoreStageTypeArrays(array.get(), stage_states);
         }
         buffer_queue_->Close();
-        for (auto& thread : upload_threads_) {
-          if (thread.joinable()) thread.join();
-        }
+        JoinUploadThreads();
         return Status::IO("[hologres] Failed to allocate slice buffers");
       }
 
@@ -982,9 +971,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
           RestoreStageTypeArrays(array.get(), stage_states);
         }
         buffer_queue_->Close();
-        for (auto& thread : upload_threads_) {
-          if (thread.joinable()) thread.join();
-        }
+        JoinUploadThreads();
         return ipc_status;
       }
 
@@ -1009,11 +996,7 @@ Status HologresStageWriter::WriteToStage(struct ArrowArrayStream* stream,
   }
 
   buffer_queue_->Close();
-  for (auto& thread : upload_threads_) {
-    if (thread.joinable()) {
-      thread.join();
-    }
-  }
+  JoinUploadThreads();
 
   if (error_flag_) {
     return Status::IO(error_message_);

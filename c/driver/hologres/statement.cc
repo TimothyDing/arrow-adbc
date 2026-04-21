@@ -367,44 +367,41 @@ AdbcStatusCode HologresStatement::CreateBulkTable(
 
   {
     if (!ingest_.db_schema.empty()) {
-      char* escaped =
-          PQescapeIdentifier(conn, ingest_.db_schema.c_str(), ingest_.db_schema.size());
-      if (escaped == nullptr) {
+      adbcpq::PqEscapedString escaped(
+          PQescapeIdentifier(conn, ingest_.db_schema.c_str(), ingest_.db_schema.size()));
+      if (!escaped) {
         InternalAdbcSetError(
             error, "[hologres] Failed to escape target schema %s for ingestion: %s",
             ingest_.db_schema.c_str(), PQerrorMessage(conn));
         return ADBC_STATUS_INTERNAL;
       }
-      *escaped_table += escaped;
+      *escaped_table += escaped.c_str();
       *escaped_table += " . ";
-      PQfreemem(escaped);
     } else if (ingest_.temporary) {
       *escaped_table += "pg_temp . ";
     } else {
-      char* escaped =
-          PQescapeIdentifier(conn, current_schema.c_str(), current_schema.size());
-      if (escaped == nullptr) {
+      adbcpq::PqEscapedString escaped(
+          PQescapeIdentifier(conn, current_schema.c_str(), current_schema.size()));
+      if (!escaped) {
         InternalAdbcSetError(
             error, "[hologres] Failed to escape current schema for ingestion: %s",
             PQerrorMessage(conn));
         return ADBC_STATUS_INTERNAL;
       }
-      *escaped_table += escaped;
+      *escaped_table += escaped.c_str();
       *escaped_table += " . ";
-      PQfreemem(escaped);
     }
 
     if (!ingest_.target.empty()) {
-      char* escaped =
-          PQescapeIdentifier(conn, ingest_.target.c_str(), ingest_.target.size());
-      if (escaped == nullptr) {
+      adbcpq::PqEscapedString escaped(
+          PQescapeIdentifier(conn, ingest_.target.c_str(), ingest_.target.size()));
+      if (!escaped) {
         InternalAdbcSetError(
             error, "[hologres] Failed to escape target table %s for ingestion: %s",
             ingest_.target.c_str(), PQerrorMessage(conn));
         return ADBC_STATUS_INTERNAL;
       }
-      *escaped_table += escaped;
-      PQfreemem(escaped);
+      *escaped_table += escaped.c_str();
     }
   }
 
@@ -451,16 +448,16 @@ AdbcStatusCode HologresStatement::CreateBulkTable(
     }
 
     const char* unescaped = source_schema.children[i]->name;
-    char* escaped = PQescapeIdentifier(conn, unescaped, std::strlen(unescaped));
-    if (escaped == nullptr) {
+    adbcpq::PqEscapedString escaped(
+        PQescapeIdentifier(conn, unescaped, std::strlen(unescaped)));
+    if (!escaped) {
       InternalAdbcSetError(error,
                            "[hologres] Failed to escape column %s for ingestion: %s",
                            unescaped, PQerrorMessage(conn));
       return ADBC_STATUS_INTERNAL;
     }
-    create += escaped;
-    *escaped_field_list += escaped;
-    PQfreemem(escaped);
+    create += escaped.c_str();
+    *escaped_field_list += escaped.c_str();
 
     adbcpq::PostgresType pg_type;
     struct ArrowError na_error;
@@ -474,9 +471,9 @@ AdbcStatusCode HologresStatement::CreateBulkTable(
 
     // Build type list for EXTERNAL_FILES AS clause: "col_name" type
     if (escaped_type_list) {
-      char* escaped2 = PQescapeIdentifier(conn, unescaped, std::strlen(unescaped));
-      *escaped_type_list += escaped2;
-      PQfreemem(escaped2);
+      adbcpq::PqEscapedString escaped2(
+          PQescapeIdentifier(conn, unescaped, std::strlen(unescaped)));
+      *escaped_type_list += escaped2.c_str();
       *escaped_type_list += " " + type_name;
     }
   }
@@ -681,16 +678,8 @@ AdbcStatusCode HologresStatement::ExecuteIngest(struct ArrowArrayStream* stream,
   // Get current schema to avoid temp table shadowing
   std::string current_schema;
   {
-    adbcpq::PqResultHelper result_helper{connection_->conn(), "SELECT CURRENT_SCHEMA()"};
-    RAISE_STATUS(error, result_helper.Execute());
-    auto it = result_helper.begin();
-    if (it == result_helper.end()) {
-      InternalAdbcSetError(
-          error,
-          "[hologres] PostgreSQL returned no rows for 'SELECT CURRENT_SCHEMA()'");
-      return ADBC_STATUS_INTERNAL;
-    }
-    current_schema = (*it)[0].data;
+    AdbcStatusCode status = connection_->GetCurrentSchema(&current_schema, error);
+    if (status != ADBC_STATUS_OK) return status;
   }
 
   adbcpq::BindStream bind_stream;
@@ -827,7 +816,7 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
                                                      int64_t* rows_affected,
                                                      struct AdbcError* error) {
   // Stage mode requires Hologres >= 4.1
-  const auto& hg_version = connection_->database()->HologresVersion();
+  const auto& hg_version = connection_->database()->VendorVersion();
   if (hg_version[0] < 4 || (hg_version[0] == 4 && hg_version[1] < 1)) {
     InternalAdbcSetError(
         error,
@@ -840,16 +829,8 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
   // Get current schema
   std::string current_schema;
   {
-    adbcpq::PqResultHelper result_helper{connection_->conn(), "SELECT CURRENT_SCHEMA()"};
-    RAISE_STATUS(error, result_helper.Execute());
-    auto it = result_helper.begin();
-    if (it == result_helper.end()) {
-      InternalAdbcSetError(
-          error,
-          "[hologres] PostgreSQL returned no rows for 'SELECT CURRENT_SCHEMA()'");
-      return ADBC_STATUS_INTERNAL;
-    }
-    current_schema = (*it)[0].data;
+    AdbcStatusCode status = connection_->GetCurrentSchema(&current_schema, error);
+    if (status != ADBC_STATUS_OK) return status;
   }
 
   // Setup bind stream and create table
@@ -890,17 +871,16 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
           select_parts += ", ";
         }
         const char* col_name = bind_stream.bind_schema.value.children[i]->name;
-        char* escaped =
-            PQescapeIdentifier(conn, col_name, std::strlen(col_name));
-        if (escaped == nullptr) {
+        adbcpq::PqEscapedString escaped_raw(
+            PQescapeIdentifier(conn, col_name, std::strlen(col_name)));
+        if (!escaped_raw) {
           InternalAdbcSetError(
               error,
               "[hologres] Failed to escape column %s for type resolution: %s",
               col_name, PQerrorMessage(conn));
           return ADBC_STATUS_INTERNAL;
         }
-        std::string escaped_col(escaped);
-        PQfreemem(escaped);
+        std::string escaped_col(escaped_raw.c_str());
 
         // Determine Arrow-inferred type for AS clause fallback
         std::string arrow_type = "text";
@@ -999,10 +979,10 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
     if (PQresultStatus(pk_result) == PGRES_TUPLES_OK) {
       for (int r = 0; r < PQntuples(pk_result); r++) {
         if (r > 0) pk_columns += ", ";
-        char* escaped = PQescapeIdentifier(connection_->conn(),
-                                           PQgetvalue(pk_result, r, 0),
-                                           strlen(PQgetvalue(pk_result, r, 0)));
-        if (escaped == nullptr) {
+        adbcpq::PqEscapedString escaped(
+            PQescapeIdentifier(connection_->conn(), PQgetvalue(pk_result, r, 0),
+                               strlen(PQgetvalue(pk_result, r, 0))));
+        if (!escaped) {
           PQclear(pk_result);
           main_writer.DropStage();
           InternalAdbcSetError(
@@ -1010,8 +990,7 @@ AdbcStatusCode HologresStatement::ExecuteIngestStage(struct ArrowArrayStream* st
               PQerrorMessage(connection_->conn()));
           return ADBC_STATUS_INTERNAL;
         }
-        pk_columns += escaped;
-        PQfreemem(escaped);
+        pk_columns += escaped.c_str();
       }
     }
     PQclear(pk_result);

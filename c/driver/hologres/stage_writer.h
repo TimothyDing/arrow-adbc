@@ -42,13 +42,18 @@ enum class OnConflictMode {
 };
 
 /// Configuration for Hologres stage-based ingestion
+static constexpr int64_t kDefaultTtlSeconds = 7200;
+static constexpr int64_t kDefaultBatchSize = 8192;
+static constexpr int64_t kDefaultTargetFileSize = 10 * 1024 * 1024;
+static constexpr int kDefaultUploadConcurrency = 4;
+
 struct HologresStageConfig {
   std::string stage_name;
   std::string group_name = "default_group";
-  int64_t ttl_seconds = 7200;
-  int64_t batch_size = 8192;
-  int64_t target_file_size = 10 * 1024 * 1024;
-  int upload_concurrency = 4;
+  int64_t ttl_seconds = kDefaultTtlSeconds;
+  int64_t batch_size = kDefaultBatchSize;
+  int64_t target_file_size = kDefaultTargetFileSize;
+  int upload_concurrency = kDefaultUploadConcurrency;
 };
 
 /// Memory buffer containing serialized Arrow IPC data
@@ -126,6 +131,7 @@ class HologresStageWriter {
   std::mutex error_mutex_;
 
   void UploadThread();
+  void JoinUploadThreads();
   Status UploadBufferToStage(const StageBuffer& buffer);
 
   friend class HologresStageWriterTestHelper;

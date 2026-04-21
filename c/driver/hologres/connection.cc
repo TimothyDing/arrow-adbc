@@ -527,16 +527,10 @@ AdbcStatusCode HologresConnection::GetOption(const char* option, char* value,
   if (std::strcmp(option, ADBC_CONNECTION_OPTION_CURRENT_CATALOG) == 0) {
     output = PQdb(conn_);
   } else if (std::strcmp(option, ADBC_CONNECTION_OPTION_CURRENT_DB_SCHEMA) == 0) {
-    adbcpq::PqResultHelper result_helper{conn_, "SELECT CURRENT_SCHEMA()"};
-    RAISE_STATUS(error, result_helper.Execute());
-    auto it = result_helper.begin();
-    if (it == result_helper.end()) {
-      InternalAdbcSetError(
-          error,
-          "[hologres] Hologres returned no rows for 'SELECT CURRENT_SCHEMA()'");
-      return ADBC_STATUS_INTERNAL;
+    {
+      AdbcStatusCode status = GetCurrentSchema(&output, error);
+      if (status != ADBC_STATUS_OK) return status;
     }
-    output = (*it)[0].data;
   } else if (std::strcmp(option, ADBC_CONNECTION_OPTION_AUTOCOMMIT) == 0) {
     output = ADBC_OPTION_VALUE_ENABLED;
   } else {
@@ -912,14 +906,14 @@ AdbcStatusCode HologresConnection::GetTableSchema(const char* catalog,
                                                   struct AdbcError* error) {
   AdbcStatusCode final_status = ADBC_STATUS_OK;
 
-  char* quoted = PQescapeIdentifier(conn_, table_name, strlen(table_name));
-  std::string table_name_str(quoted);
-  PQfreemem(quoted);
+  adbcpq::PqEscapedString quoted(
+      PQescapeIdentifier(conn_, table_name, strlen(table_name)));
+  std::string table_name_str(quoted.c_str());
 
   if (db_schema != nullptr) {
-    quoted = PQescapeIdentifier(conn_, db_schema, strlen(db_schema));
-    table_name_str = std::string(quoted) + "." + table_name_str;
-    PQfreemem(quoted);
+    adbcpq::PqEscapedString quoted_schema(
+        PQescapeIdentifier(conn_, db_schema, strlen(db_schema)));
+    table_name_str = std::string(quoted_schema.c_str()) + "." + table_name_str;
   }
 
   std::string query =
@@ -933,7 +927,7 @@ AdbcStatusCode HologresConnection::GetTableSchema(const char* catalog,
   std::vector<std::string> params = {table_name_str};
 
   adbcpq::PqResultHelper result_helper =
-      adbcpq::PqResultHelper{conn_, std::string(query.c_str())};
+      adbcpq::PqResultHelper{conn_, query};
 
   RAISE_STATUS(error, result_helper.Execute(params));
 
@@ -1032,14 +1026,14 @@ AdbcStatusCode HologresConnection::SetOption(const char* key, const char* value,
     }
     return ADBC_STATUS_OK;
   } else if (std::strcmp(key, ADBC_CONNECTION_OPTION_CURRENT_DB_SCHEMA) == 0) {
-    char* value_esc = PQescapeIdentifier(conn_, value, strlen(value));
+    adbcpq::PqEscapedString value_esc(
+        PQescapeIdentifier(conn_, value, strlen(value)));
     if (!value_esc) {
       InternalAdbcSetError(error, "[hologres] Could not escape identifier: %s",
                            PQerrorMessage(conn_));
       return ADBC_STATUS_INTERNAL;
     }
-    std::string query = fmt::format("SET search_path TO {}", value_esc);
-    PQfreemem(value_esc);
+    std::string query = fmt::format("SET search_path TO {}", value_esc.c_str());
 
     adbcpq::PqResultHelper result_helper{conn_, query};
     RAISE_STATUS(error, result_helper.Execute());
@@ -1066,6 +1060,21 @@ AdbcStatusCode HologresConnection::SetOptionInt(const char* key, int64_t value,
                                                 struct AdbcError* error) {
   InternalAdbcSetError(error, "[hologres] Unknown connection option: %s", key);
   return ADBC_STATUS_NOT_IMPLEMENTED;
+}
+
+AdbcStatusCode HologresConnection::GetCurrentSchema(std::string* out,
+                                                     struct AdbcError* error) {
+  adbcpq::PqResultHelper result_helper{conn_, "SELECT CURRENT_SCHEMA()"};
+  RAISE_STATUS(error, result_helper.Execute());
+  auto it = result_helper.begin();
+  if (it == result_helper.end()) {
+    InternalAdbcSetError(
+        error,
+        "[hologres] PostgreSQL returned no rows for 'SELECT CURRENT_SCHEMA()'");
+    return ADBC_STATUS_INTERNAL;
+  }
+  *out = (*it)[0].data;
+  return ADBC_STATUS_OK;
 }
 
 }  // namespace adbchg

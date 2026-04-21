@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,11 +51,17 @@ class MockTypeResolver : public PostgresTypeResolver {
       NANOARROW_RETURN_NOT_OK(Insert(item, nullptr));
     }
 
-    // Insert one of each nested type
+    // Insert array types
     item.oid++;
     item.typname = "_bool";
     item.typreceive = "array_recv";
     item.child_oid = GetOID(PostgresTypeId::kBool);
+    NANOARROW_RETURN_NOT_OK(Insert(item, nullptr));
+
+    item.oid++;
+    item.typname = "_int4";
+    item.typreceive = "array_recv";
+    item.child_oid = GetOID(PostgresTypeId::kInt4);
     NANOARROW_RETURN_NOT_OK(Insert(item, nullptr));
 
     item.oid++;
@@ -132,42 +139,54 @@ class CopyReaderTester {
   ArrowError na_error_;
 };
 
-static PostgresType MakeRecordType(PostgresTypeId child_type_id) {
+[[maybe_unused]] static PostgresType MakeRecordType(PostgresTypeId child_type_id) {
   PostgresType record(PostgresTypeId::kRecord);
   record.AppendChild("col", PostgresType(child_type_id));
   return record;
 }
 
 // ---------------------------------------------------------------------------
-// CopyWriterTester  (new helper for writer round-trip tests)
+// CopyWriterTester  (helper for writer round-trip tests)
 // ---------------------------------------------------------------------------
 
 class CopyWriterTester {
  public:
   ArrowErrorCode Init(struct ArrowSchema* schema, struct ArrowArray* array,
-                      const PostgresTypeResolver& type_resolver,
-                      const std::vector<PostgresType>& pg_types,
-                      struct ArrowError* error = nullptr) {
+                      const PostgresTypeResolver& resolver,
+                      const std::vector<PostgresType>& pg_types) {
     NANOARROW_RETURN_NOT_OK(writer_.Init(schema));
-    NANOARROW_RETURN_NOT_OK(writer_.InitFieldWriters(type_resolver, pg_types, error));
+    NANOARROW_RETURN_NOT_OK(writer_.InitFieldWriters(resolver, pg_types, &na_error_));
     NANOARROW_RETURN_NOT_OK(writer_.SetArray(array));
+    NANOARROW_RETURN_NOT_OK(writer_.WriteHeader(&na_error_));
     return NANOARROW_OK;
   }
 
-  ArrowErrorCode WriteAll(struct ArrowError* error) {
-    NANOARROW_RETURN_NOT_OK(writer_.WriteHeader(error));
+  ArrowErrorCode WriteAll(ArrowError* error) {
     int result;
     do {
-      result = writer_.WriteRecord(error);
+      result = writer_.WriteRecord(&na_error_);
     } while (result == NANOARROW_OK);
+    if (error) {
+      std::memcpy(error, &na_error_, sizeof(ArrowError));
+    }
     return result;
   }
 
+  std::vector<uint8_t> FinishBuffer() const {
+    const auto& buf = writer_.WriteBuffer();
+    std::vector<uint8_t> out(buf.size_bytes + 2);
+    std::memcpy(out.data(), buf.data, buf.size_bytes);
+    out[buf.size_bytes] = 0xFF;
+    out[buf.size_bytes + 1] = 0xFF;
+    return out;
+  }
+
   const struct ArrowBuffer& WriteBuffer() const { return writer_.WriteBuffer(); }
-  void Rewind() { writer_.Rewind(); }
+  const ArrowError& error() const { return na_error_; }
 
  private:
   PostgresCopyStreamWriter writer_;
+  ArrowError na_error_;
 };
 
 }  // namespace adbcpq

@@ -134,7 +134,11 @@ class PostgresCopyFieldTupleWriter : public PostgresCopyFieldWriter {
     }
 
     const int16_t n_fields = children_.size();
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int16_t>(buffer, n_fields, error));
+
+    // Reserve conservatively for the row: field count + (size prefix + ~16 bytes) per field
+    NANOARROW_RETURN_NOT_OK(
+        ArrowBufferReserve(buffer, sizeof(int16_t) + n_fields * 20));
+    WriteUnsafe<int16_t>(buffer, n_fields);
 
     for (int16_t i = 0; i < n_fields; i++) {
       const int8_t is_null = ArrowArrayViewIsNull(array_view_->children[i], index);
@@ -277,80 +281,62 @@ class PostgresCopyNumericFieldWriter : public PostgresCopyFieldWriter {
     const int16_t sign = ArrowDecimalSign(&decimal) > 0 ? kNumericPos : kNumericNeg;
 
     // Convert decimal to string and split into integer/fractional parts
-    // Example transformation for Arrow Decimal(value=12345, scale=2) representing 123.45:
-    //   Input: decimal.value = 12345, scale_ = 2
-    //   After DecimalToString: raw_decimal_string = "12345", original_digits = 5
-    //   After SplitDecimalParts: parts.integer_part = "123"
-    //                           parts.fractional_part = "45"
-    //                           parts.effective_scale = 2
     char raw_decimal_string[max_decimal_digits_ + 1];
     int original_digits = DecimalToString<bitwidth_>(&decimal, raw_decimal_string);
-    DecimalParts parts = SplitDecimalParts(raw_decimal_string, original_digits, scale_);
+    SplitDecimalParts(raw_decimal_string, original_digits, scale_);
 
     // Group into PostgreSQL base-10000 representation
-    //   After GroupIntegerDigits: int_digits = [123], weight = 0
-    //     (groups "123" right-to-left: "123" → 123, only 1 group so weight = 0)
-    auto [int_digits, weight] = GroupIntegerDigits(parts.integer_part);
+    int16_t weight = GroupIntegerDigits(int_part_);
+    int16_t final_weight =
+        GroupFractionalDigits(frac_part_, weight, !int_part_.empty());
 
-    //   After GroupFractionalDigits: frac_digits = [4500], final_weight = 0
-    //     (groups "45" left-to-right with right-padding: "45" → "4500" → 4500)
-    auto [frac_digits, final_weight] =
-        GroupFractionalDigits(parts.fractional_part, weight, !parts.integer_part.empty());
+    // Combine digit arrays (int_digits_ already in correct order)
+    all_digits_.resize(int_digits_.size() + frac_digits_.size());
+    std::copy(int_digits_.begin(), int_digits_.end(), all_digits_.begin());
+    std::copy(frac_digits_.begin(), frac_digits_.end(),
+              all_digits_.begin() + int_digits_.size());
 
-    // Combine digit arrays
-    //   After combining: all_digits = [123, 4500]
-    std::vector<int16_t> all_digits = int_digits;
-    all_digits.insert(all_digits.end(), frac_digits.begin(), frac_digits.end());
-
-    // Calculate display scale by counting trailing zeros in the DECIMAL STRING
-    //   For our example: frac_part="45" has 0 trailing zeros, effective_scale=2
-    //   So dscale = 2 - 0 = 2 (2 fractional digits to display)
+    // Calculate display scale by counting trailing zeros in the fractional string
     int trailing_zeros = 0;
-    for (int j = parts.fractional_part.length() - 1;
-         j >= 0 && parts.fractional_part[j] == '0'; j--) {
+    for (int j = frac_part_.length() - 1; j >= 0 && frac_part_[j] == '0'; j--) {
       trailing_zeros++;
     }
     int16_t dscale =
-        static_cast<int16_t>((std::max)(0, parts.effective_scale - trailing_zeros));
+        static_cast<int16_t>((std::max)(0, effective_scale_ - trailing_zeros));
 
-    // Optimize: remove trailing zero digit groups from fractional part
-    int n_int_digit_groups = int_digits.size();
-    while (static_cast<int>(all_digits.size()) > n_int_digit_groups &&
-           all_digits.back() == 0) {
-      all_digits.pop_back();
+    // Remove trailing zero digit groups from fractional part
+    int n_int_digit_groups = int_digits_.size();
+    while (static_cast<int>(all_digits_.size()) > n_int_digit_groups &&
+           all_digits_.back() == 0) {
+      all_digits_.pop_back();
     }
 
     // Handle zero special case
-    if (all_digits.empty()) {
+    if (all_digits_.empty()) {
       final_weight = 0;
       dscale = 0;
-    } else if (static_cast<int>(all_digits.size()) <= n_int_digit_groups) {
-      // All fractional digits were removed
+    } else if (static_cast<int>(all_digits_.size()) <= n_int_digit_groups) {
       dscale = 0;
     }
 
     if (dscale < 0) dscale = 0;
 
     // Write PostgreSQL NUMERIC binary format to buffer
-    //   Final values for our example: ndigits = 2
-    //                                final_weight = 0
-    //                                sign = 0x0000
-    //                                dscale = 2
-    //                                digits = [123, 4500]
-    //   Binary output represents: 123 * 10000^0 + 4500 * 10000^(-1) = 123 + 0.45 = 123.45
-    int16_t ndigits = all_digits.size();
+    int16_t ndigits = all_digits_.size();
     int32_t field_size_bytes = sizeof(ndigits) + sizeof(final_weight) + sizeof(sign) +
                                sizeof(dscale) + ndigits * sizeof(int16_t);
 
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int32_t>(buffer, field_size_bytes, error));
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int16_t>(buffer, ndigits, error));
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int16_t>(buffer, final_weight, error));
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int16_t>(buffer, sign, error));
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int16_t>(buffer, dscale, error));
+    // Reserve all bytes at once, then use WriteUnsafe
+    const size_t total_bytes =
+        sizeof(int32_t) + 4 * sizeof(int16_t) + ndigits * sizeof(int16_t);
+    NANOARROW_RETURN_NOT_OK(ArrowBufferReserve(buffer, total_bytes));
+    WriteUnsafe<int32_t>(buffer, field_size_bytes);
+    WriteUnsafe<int16_t>(buffer, ndigits);
+    WriteUnsafe<int16_t>(buffer, final_weight);
+    WriteUnsafe<int16_t>(buffer, sign);
+    WriteUnsafe<int16_t>(buffer, dscale);
 
-    const size_t pg_digit_bytes = sizeof(int16_t) * all_digits.size();
-    NANOARROW_RETURN_NOT_OK(ArrowBufferReserve(buffer, pg_digit_bytes));
-    for (auto pg_digit : all_digits) {
+    for (auto pg_digit : all_digits_) {
       WriteUnsafe<int16_t>(buffer, pg_digit);
     }
 
@@ -358,17 +344,6 @@ class PostgresCopyNumericFieldWriter : public PostgresCopyFieldWriter {
   }
 
  private:
-  // Helper struct for organizing data flow between functions
-  struct DecimalParts {
-    std::string integer_part;     // e.g., "12300" or "123"
-    std::string fractional_part;  // e.g., "45" or "00123"
-    int effective_scale;          // Scale after handling negative values
-  };
-
-  // Helper function implementations for decimal-to-PostgreSQL NUMERIC conversion
-
-  // Convert decimal to string (absolute value, no sign)
-  // Returns the length of the string
   template <int32_t DEC_WIDTH>
   int DecimalToString(struct ArrowDecimal* decimal, char* out) const {
     constexpr size_t nwords = (DEC_WIDTH == 128) ? 2 : 4;
@@ -420,63 +395,50 @@ class PostgresCopyNumericFieldWriter : public PostgresCopyFieldWriter {
     return ndigits;
   }
 
-  DecimalParts SplitDecimalParts(const char* decimal_digits, int digit_count,
-                                 int scale) const {
-    // Virtual zeros represent the logical zeros appended for negative scale
-    // Example: value=123, scale=-2 → "123" with 2 virtual zeros = "12300"
+  // Splits decimal string into integer/fractional parts, writing to member variables
+  void SplitDecimalParts(const char* decimal_digits, int digit_count, int scale) {
     const int virtual_zeros = (scale < 0) ? -scale : 0;
-    const int effective_scale = (scale < 0) ? 0 : scale;
+    effective_scale_ = (scale < 0) ? 0 : scale;
     const int total_logical_digits = digit_count + virtual_zeros;
 
-    // Calculate split point
-    const int n_int_digits = total_logical_digits > effective_scale
-                                 ? total_logical_digits - effective_scale
+    const int n_int_digits = total_logical_digits > effective_scale_
+                                 ? total_logical_digits - effective_scale_
                                  : 0;
     const int n_frac_digits = total_logical_digits - n_int_digits;
 
-    DecimalParts parts;
-    parts.effective_scale = effective_scale;
+    int_part_.clear();
+    frac_part_.clear();
 
-    // Extract integer part
     if (n_int_digits > 0) {
       if (n_int_digits <= digit_count) {
-        // Integer part is within the original digits
-        parts.integer_part.assign(decimal_digits, n_int_digits);
+        int_part_.assign(decimal_digits, n_int_digits);
       } else {
-        // Integer part includes all original digits + virtual zeros
-        parts.integer_part.assign(decimal_digits, digit_count);
-        parts.integer_part.append(virtual_zeros, '0');
+        int_part_.assign(decimal_digits, digit_count);
+        int_part_.append(virtual_zeros, '0');
       }
     }
 
-    // Extract fractional part (only exists if scale > 0)
-    if (n_int_digits == 0 && total_logical_digits < effective_scale) {
-      // Small fractional: 0.00123 needs leading zeros
-      parts.fractional_part.assign(effective_scale - total_logical_digits, '0');
-      parts.fractional_part.append(decimal_digits, digit_count);
+    if (n_int_digits == 0 && total_logical_digits < effective_scale_) {
+      frac_part_.assign(effective_scale_ - total_logical_digits, '0');
+      frac_part_.append(decimal_digits, digit_count);
     } else if (n_frac_digits > 0 && n_int_digits < digit_count) {
-      // Fractional part from remaining digits (virtual zeros don't appear in fractional
-      // part)
-      parts.fractional_part.assign(decimal_digits + n_int_digits,
-                                   digit_count - n_int_digits);
+      frac_part_.assign(decimal_digits + n_int_digits, digit_count - n_int_digits);
     }
-
-    return parts;
   }
 
-  std::pair<std::vector<int16_t>, int16_t> GroupIntegerDigits(
-      const std::string& int_part) const {
+  // Groups integer digits into base-10000 chunks, writes to int_digits_
+  // Returns weight
+  int16_t GroupIntegerDigits(const std::string& int_part) {
     constexpr int kDecDigits = 4;
-    std::vector<int16_t> digits;
+    int_digits_.clear();
 
     if (int_part.empty()) {
-      return {digits, -1};  // weight = -1 for pure fractional numbers
+      return -1;  // weight = -1 for pure fractional numbers
     }
 
-    // Calculate weight: ceil(length / 4) - 1
     int16_t weight = (int_part.length() + kDecDigits - 1) / kDecDigits - 1;
 
-    // Group right-to-left in chunks of 4
+    // Group right-to-left, push_back in reverse order then reverse once
     int i = int_part.length();
     while (i > 0) {
       int chunk_size = (std::min)(i, kDecDigits);
@@ -486,49 +448,49 @@ class PostgresCopyNumericFieldWriter : public PostgresCopyFieldWriter {
       int16_t val{};
       std::from_chars(chunk.data(), chunk.data() + chunk.size(), val);
 
-      // Skip trailing zeros
-      if (val != 0 || !digits.empty()) {
-        digits.insert(digits.begin(), val);
+      if (val != 0 || !int_digits_.empty()) {
+        int_digits_.push_back(val);
       }
       i -= chunk_size;
     }
+    std::reverse(int_digits_.begin(), int_digits_.end());
 
-    return {digits, weight};
+    return weight;
   }
 
-  std::pair<std::vector<int16_t>, int16_t> GroupFractionalDigits(
-      const std::string& frac_part, int16_t initial_weight, bool has_integer_part) const {
+  // Groups fractional digits into base-10000 chunks, writes to frac_digits_
+  // Returns final weight
+  int16_t GroupFractionalDigits(const std::string& frac_part, int16_t initial_weight,
+                                bool has_integer_part) {
     constexpr int kDecDigits = 4;
-    std::vector<int16_t> digits;
+    frac_digits_.clear();
     int16_t weight = initial_weight;
 
     if (frac_part.empty()) {
-      return {digits, weight};
+      return weight;
     }
 
     bool skip_leading_zeros = !has_integer_part;
 
-    // Group left-to-right in chunks of 4, right-padding last chunk
     for (size_t i = 0; i < frac_part.length(); i += kDecDigits) {
       int chunk_size = (std::min)(kDecDigits, static_cast<int>(frac_part.length() - i));
-      std::string chunk_str = frac_part.substr(i, chunk_size);
 
-      // Right-pad to 4 digits (e.g., "45" → "4500")
-      chunk_str.resize(kDecDigits, '0');
+      // Use stack buffer instead of heap-allocated string for right-padding
+      char chunk_buf[4] = {'0', '0', '0', '0'};
+      std::memcpy(chunk_buf, frac_part.data() + i, chunk_size);
 
       int16_t val{};
-      std::from_chars(chunk_str.data(), chunk_str.data() + chunk_str.size(), val);
+      std::from_chars(chunk_buf, chunk_buf + kDecDigits, val);
 
       if (skip_leading_zeros && val == 0) {
-        // Skip leading zero groups in fractional part (e.g., 0.0012 → skip "0012")
         weight--;
       } else {
-        digits.push_back(val);
+        frac_digits_.push_back(val);
         skip_leading_zeros = false;
       }
     }
 
-    return {digits, weight};
+    return weight;
   }
 
   static constexpr uint16_t kNumericPos = 0x0000;
@@ -538,6 +500,14 @@ class PostgresCopyNumericFieldWriter : public PostgresCopyFieldWriter {
       (T == NANOARROW_TYPE_DECIMAL128) ? 39 : 78;
   const int32_t precision_;
   const int32_t scale_;
+
+  // Reusable buffers to avoid per-row heap allocations
+  std::string int_part_;
+  std::string frac_part_;
+  int effective_scale_ = 0;
+  std::vector<int16_t> int_digits_;
+  std::vector<int16_t> frac_digits_;
+  std::vector<int16_t> all_digits_;
 };
 
 template <enum ArrowTimeUnit TU>
@@ -647,7 +617,11 @@ class PostgresCopyListFieldWriter : public PostgresCopyFieldWriter {
  public:
   explicit PostgresCopyListFieldWriter(uint32_t child_oid,
                                        std::unique_ptr<PostgresCopyFieldWriter> child)
-      : child_oid_{child_oid}, child_{std::move(child)} {}
+      : child_oid_{child_oid}, child_{std::move(child)} {
+    ArrowBufferInit(&tmp_buffer_);
+  }
+
+  ~PostgresCopyListFieldWriter() override { ArrowBufferReset(&tmp_buffer_); }
 
   ArrowErrorCode Write(ArrowBuffer* buffer, int64_t index, ArrowError* error) override {
     if (index >= array_view_->length) {
@@ -657,7 +631,6 @@ class PostgresCopyListFieldWriter : public PostgresCopyFieldWriter {
     constexpr int32_t ndim = 1;
     constexpr int32_t has_null_flags = 0;
 
-    // TODO: the LARGE_LIST should use 64 bit indexes
     int32_t start, end;
     if constexpr (IsFixedSize) {
       start = index * array_view_->layout.child_size_elements;
@@ -670,34 +643,30 @@ class PostgresCopyListFieldWriter : public PostgresCopyFieldWriter {
     const int32_t dim = end - start;
     constexpr int32_t lb = 1;
 
-    // for children of a fixed size T we could avoid the use of a temporary buffer
-    /// and theoretically just write
-    //
-    // const int32_t field_size_bytes =
-    //    sizeof(ndim) + sizeof(has_null_flags) + sizeof(child_oid_) + sizeof(dim) * ndim
-    //    + sizeof(lb) * ndim
-    //    + sizeof(int32_t) * dim + T * dim;
-    //
-    // directly to our buffer
-    nanoarrow::UniqueBuffer tmp;
-    ArrowBufferInit(tmp.get());
+    // Reuse tmp_buffer_ across calls to avoid per-list-element allocation
+    tmp_buffer_.size_bytes = 0;
     for (auto i = start; i < end; ++i) {
-      NANOARROW_RETURN_NOT_OK(child_->Write(tmp.get(), i, error));
+      NANOARROW_RETURN_NOT_OK(child_->Write(&tmp_buffer_, i, error));
     }
     const int32_t field_size_bytes = sizeof(ndim) + sizeof(has_null_flags) +
                                      sizeof(child_oid_) + sizeof(dim) * ndim +
-                                     sizeof(lb) * ndim + tmp->size_bytes;
+                                     sizeof(lb) * ndim + tmp_buffer_.size_bytes;
 
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int32_t>(buffer, field_size_bytes, error));
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int32_t>(buffer, ndim, error));
-    NANOARROW_RETURN_NOT_OK(WriteChecked<int32_t>(buffer, has_null_flags, error));
-    NANOARROW_RETURN_NOT_OK(WriteChecked<uint32_t>(buffer, child_oid_, error));
+    // Reserve header bytes at once
+    const size_t header_bytes =
+        sizeof(int32_t) * (1 + 1 + 1 + 1 + ndim + ndim);
+    NANOARROW_RETURN_NOT_OK(ArrowBufferReserve(buffer, header_bytes));
+    WriteUnsafe<int32_t>(buffer, field_size_bytes);
+    WriteUnsafe<int32_t>(buffer, ndim);
+    WriteUnsafe<int32_t>(buffer, has_null_flags);
+    WriteUnsafe<uint32_t>(buffer, child_oid_);
     for (int32_t i = 0; i < ndim; ++i) {
-      NANOARROW_RETURN_NOT_OK(WriteChecked<int32_t>(buffer, dim, error));
-      NANOARROW_RETURN_NOT_OK(WriteChecked<int32_t>(buffer, lb, error));
+      WriteUnsafe<int32_t>(buffer, dim);
+      WriteUnsafe<int32_t>(buffer, lb);
     }
 
-    NANOARROW_RETURN_NOT_OK(ArrowBufferAppend(buffer, tmp->data, tmp->size_bytes));
+    NANOARROW_RETURN_NOT_OK(
+        ArrowBufferAppend(buffer, tmp_buffer_.data, tmp_buffer_.size_bytes));
 
     return NANOARROW_OK;
   }
@@ -705,6 +674,7 @@ class PostgresCopyListFieldWriter : public PostgresCopyFieldWriter {
  private:
   const uint32_t child_oid_;
   std::unique_ptr<PostgresCopyFieldWriter> child_;
+  ArrowBuffer tmp_buffer_;
 };
 
 template <enum ArrowTimeUnit TU>

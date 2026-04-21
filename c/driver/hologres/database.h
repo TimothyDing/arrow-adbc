@@ -77,7 +77,6 @@ class HologresDatabase {
 
   std::string_view VendorName() const { return "Hologres"; }
   const std::array<int, 3>& VendorVersion() const { return hologres_server_version_; }
-  const std::array<int, 3>& HologresVersion() const { return hologres_server_version_; }
   const std::array<int, 3>& PostgresVersion() const { return postgres_server_version_; }
 
   const std::string& uri() const { return uri_; }

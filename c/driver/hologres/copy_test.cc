@@ -23,59 +23,14 @@
 
 #include "copy/reader.h"
 #include "postgres_type.h"
+#include "test_util.h"
 
 // Pre-generated PG COPY binary data from the PostgreSQL driver tests
 #include "postgresql/copy/postgres_copy_test_common.h"
 
 namespace adbcpq {
 
-// Helper: given a PG type, raw copy data, and an expected Arrow type,
-// runs the read pipeline (header + records) and returns the result array.
-class CopyReaderTester {
- public:
-  CopyReaderTester(PostgresType pg_type) : pg_type_(std::move(pg_type)) {}
-
-  ArrowErrorCode Init() {
-    NANOARROW_RETURN_NOT_OK(reader_.Init(pg_type_));
-    NANOARROW_RETURN_NOT_OK(reader_.InferOutputSchema("PostgreSQL", &na_error_));
-    NANOARROW_RETURN_NOT_OK(reader_.InitFieldReaders(&na_error_));
-    return NANOARROW_OK;
-  }
-
-  ArrowErrorCode ReadAll(const uint8_t* data, size_t len) {
-    ArrowBufferView view;
-    view.data.as_uint8 = data;
-    view.size_bytes = static_cast<int64_t>(len);
-
-    NANOARROW_RETURN_NOT_OK(reader_.ReadHeader(&view, &na_error_));
-
-    int result;
-    do {
-      result = reader_.ReadRecord(&view, &na_error_);
-    } while (result == NANOARROW_OK);
-
-    if (result != ENODATA) return result;
-
-    NANOARROW_RETURN_NOT_OK(reader_.GetArray(array_.get(), &na_error_));
-    return NANOARROW_OK;
-  }
-
-  ArrowArray* array() { return array_.get(); }
-  const ArrowError& error() const { return na_error_; }
-  PostgresCopyStreamReader& reader() { return reader_; }
-
- private:
-  PostgresType pg_type_;
-  PostgresCopyStreamReader reader_;
-  nanoarrow::UniqueArray array_;
-  ArrowError na_error_;
-};
-
-static PostgresType MakeRecordType(PostgresTypeId child_type_id) {
-  PostgresType record(PostgresTypeId::kRecord);
-  record.AppendChild("col", PostgresType(child_type_id));
-  return record;
-}
+// CopyReaderTester and MakeRecordType are provided by test_util.h
 
 // ---------------------------------------------------------------------------
 // ReadHeader

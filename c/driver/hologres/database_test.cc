@@ -309,7 +309,7 @@ TEST_F(HologresDatabaseTest, ConstructorDefaults) {
   EXPECT_TRUE(db_->uri().empty());
   EXPECT_NE(db_->type_resolver(), nullptr);
   EXPECT_EQ(db_->VendorName(), "Hologres");
-  EXPECT_EQ(db_->HologresVersion()[0], 0);
+  EXPECT_EQ(db_->VendorVersion()[0], 0);
   EXPECT_EQ(db_->PostgresVersion()[0], 0);
 }
 

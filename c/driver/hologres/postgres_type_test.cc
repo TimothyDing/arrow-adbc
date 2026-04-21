@@ -23,61 +23,9 @@
 #include <nanoarrow/nanoarrow.hpp>
 
 #include "postgres_type.h"
+#include "test_util.h"
 
 namespace adbcpq {
-
-class MockTypeResolver : public PostgresTypeResolver {
- public:
-  ArrowErrorCode Init() {
-    auto all_types = PostgresTypeIdAll(false);
-    PostgresTypeResolver::Item item;
-    item.oid = 0;
-
-    // Insert all the base types
-    for (auto type_id : all_types) {
-      std::string typreceive = PostgresTyprecv(type_id);
-      std::string typname = PostgresTypname(type_id);
-      item.oid++;
-      item.typname = typname.c_str();
-      item.typreceive = typreceive.c_str();
-      NANOARROW_RETURN_NOT_OK(Insert(item, nullptr));
-    }
-
-    // Insert one of each nested type
-    item.oid++;
-    item.typname = "_bool";
-    item.typreceive = "array_recv";
-    item.child_oid = GetOID(PostgresTypeId::kBool);
-    NANOARROW_RETURN_NOT_OK(Insert(item, nullptr));
-
-    item.oid++;
-    item.typname = "boolrange";
-    item.typreceive = "range_recv";
-    item.base_oid = GetOID(PostgresTypeId::kBool);
-    NANOARROW_RETURN_NOT_OK(Insert(item, nullptr));
-
-    item.oid++;
-    item.typname = "custombool";
-    item.typreceive = "domain_recv";
-    item.base_oid = GetOID(PostgresTypeId::kBool);
-    NANOARROW_RETURN_NOT_OK(Insert(item, nullptr));
-
-    item.oid++;
-    uint32_t class_oid = item.oid;
-    std::vector<std::pair<std::string, uint32_t>> record_fields = {
-        {"int4_col", GetOID(PostgresTypeId::kInt4)},
-        {"text_col", GetOID(PostgresTypeId::kText)}};
-    InsertClass(class_oid, std::move(record_fields));
-
-    item.oid++;
-    item.typname = "customrecord";
-    item.typreceive = "record_recv";
-    item.class_oid = class_oid;
-
-    NANOARROW_RETURN_NOT_OK(Insert(item, nullptr));
-    return NANOARROW_OK;
-  }
-};
 
 TEST(PostgresTypeTest, PostgresTypeBasic) {
   PostgresType type(PostgresTypeId::kBool);

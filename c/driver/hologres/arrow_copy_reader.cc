@@ -27,12 +27,12 @@
 
 #include <lz4.h>
 
+#include "copy/copy_common.h"
 #include "postgres_util.h"
 
 namespace adbchg {
 
-// PG binary COPY signature: PGCOPY\n\xff\r\n\0
-static const char kPgCopySignature[] = "PGCOPY\n\xff\r\n";
+// Reuse the canonical signature from copy_common.h
 static constexpr int kPgCopySignatureLen = 11;
 
 ArrowCopyReader::~ArrowCopyReader() { Release(); }
@@ -96,7 +96,11 @@ void ArrowCopyReader::SkipBytes(int64_t n) { cursor_ += n; }
 
 void ArrowCopyReader::Compact() {
   if (cursor_ > 0) {
-    buffer_.erase(buffer_.begin(), buffer_.begin() + cursor_);
+    size_t remaining = buffer_.size() - cursor_;
+    if (remaining > 0) {
+      std::memmove(buffer_.data(), buffer_.data() + cursor_, remaining);
+    }
+    buffer_.resize(remaining);
     cursor_ = 0;
   }
 }
@@ -113,7 +117,8 @@ int ArrowCopyReader::ReadPgCopyHeader() {
     return rc;
   }
 
-  if (std::memcmp(buffer_.data() + cursor_, kPgCopySignature, kPgCopySignatureLen) != 0) {
+  if (std::memcmp(buffer_.data() + cursor_, adbcpq::kPgCopyBinarySignature,
+                  kPgCopySignatureLen) != 0) {
     ArrowErrorSet(&na_error_, "Invalid PG COPY binary signature");
     return EINVAL;
   }

@@ -289,44 +289,45 @@ class PostgresCopyNumericFieldReader : public PostgresCopyFieldReader {
     }
 
     digits_.clear();
+    digits_.reserve(ndigits);
     for (int16_t i = 0; i < ndigits; i++) {
       digits_.push_back(ReadUnsafe<int16_t>(data));
     }
 
-    // Handle special values
-    std::string special_value;
+    // Handle special values with early return (avoid per-row string allocation)
     switch (sign) {
       case kNumericNAN:
-        special_value = std::string("nan");
-        break;
       case kNumericPinf:
-        special_value = std::string("inf");
-        break;
-      case kNumericNinf:
-        special_value = std::string("-inf");
-        break;
+      case kNumericNinf: {
+        const char* sv_data;
+        int64_t sv_len;
+        if (sign == kNumericNAN) {
+          sv_data = "nan";
+          sv_len = 3;
+        } else if (sign == kNumericPinf) {
+          sv_data = "inf";
+          sv_len = 3;
+        } else {
+          sv_data = "-inf";
+          sv_len = 4;
+        }
+        if ((data_->size_bytes + sv_len) >
+            static_cast<int64_t>((std::numeric_limits<int32_t>::max)())) {
+          return EOVERFLOW;
+        }
+        NANOARROW_RETURN_NOT_OK(ArrowBufferAppend(data_, sv_data, sv_len));
+        NANOARROW_RETURN_NOT_OK(
+            ArrowBufferAppendInt32(offsets_, static_cast<int32_t>(data_->size_bytes)));
+        return AppendValid(array);
+      }
       case kNumericPos:
       case kNumericNeg:
-        special_value = std::string("");
         break;
       default:
         ArrowErrorSet(error,
                       "Unexpected value for sign read from Postgres numeric field: %d",
                       static_cast<int>(sign));
         return EINVAL;
-    }
-
-    if (!special_value.empty()) {
-      if ((data_->size_bytes + static_cast<int64_t>(special_value.size())) >
-          static_cast<int64_t>((std::numeric_limits<int32_t>::max)())) {
-        return EOVERFLOW;
-      }
-
-      NANOARROW_RETURN_NOT_OK(
-          ArrowBufferAppend(data_, special_value.data(), special_value.size()));
-      NANOARROW_RETURN_NOT_OK(
-          ArrowBufferAppendInt32(offsets_, static_cast<int32_t>(data_->size_bytes)));
-      return AppendValid(array);
     }
 
     // Calculate string space requirement

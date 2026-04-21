@@ -64,16 +64,16 @@ struct PqRecord {
   }
 
   Result<std::vector<std::string>> ParseTextArray() const {
-    std::string text_array(data, len);
-    text_array.erase(0, 1);
-    text_array.erase(text_array.size() - 1);
+    if (len < 2) return std::vector<std::string>{};
+    std::string_view inner(data + 1, len - 2);
 
     std::vector<std::string> elements;
-    std::stringstream ss(std::move(text_array));
-    std::string tmp;
-
-    while (getline(ss, tmp, ',')) {
-      elements.push_back(std::move(tmp));
+    size_t pos = 0;
+    while (pos <= inner.size()) {
+      size_t comma = inner.find(',', pos);
+      if (comma == std::string_view::npos) comma = inner.size();
+      elements.emplace_back(inner.substr(pos, comma - pos));
+      pos = comma + 1;
     }
 
     return elements;

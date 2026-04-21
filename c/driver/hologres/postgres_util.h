@@ -19,6 +19,7 @@
 
 #include <cstring>
 
+#include <libpq-fe.h>
 #include <nanoarrow/nanoarrow.hpp>
 
 #ifdef _WIN32
@@ -171,6 +172,38 @@ struct Handle {
   Resource* operator->() { return &value; }
 
   void reset() { Releaser<Resource>::Release(&value); }
+};
+
+/// RAII wrapper for PQescapeIdentifier results (freed with PQfreemem).
+class PqEscapedString {
+ public:
+  PqEscapedString() : str_(nullptr) {}
+  explicit PqEscapedString(char* str) : str_(str) {}
+
+  PqEscapedString(const PqEscapedString&) = delete;
+  PqEscapedString& operator=(const PqEscapedString&) = delete;
+
+  PqEscapedString(PqEscapedString&& other) noexcept : str_(other.str_) {
+    other.str_ = nullptr;
+  }
+  PqEscapedString& operator=(PqEscapedString&& other) noexcept {
+    if (this != &other) {
+      if (str_) PQfreemem(str_);
+      str_ = other.str_;
+      other.str_ = nullptr;
+    }
+    return *this;
+  }
+
+  ~PqEscapedString() {
+    if (str_) PQfreemem(str_);
+  }
+
+  const char* c_str() const { return str_; }
+  explicit operator bool() const { return str_ != nullptr; }
+
+ private:
+  char* str_;
 };
 
 }  // namespace adbcpq

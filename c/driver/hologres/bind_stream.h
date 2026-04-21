@@ -55,6 +55,8 @@ struct BindStream {
   std::vector<int> param_lengths;
   Handle<struct ArrowBuffer> param_buffer;
 
+  std::vector<bool> is_null_param;
+
   bool has_tz_field = false;
   bool autocommit = false;
   std::string tz_setting;
@@ -126,6 +128,7 @@ struct BindStream {
     param_lengths.resize(bind_schema->n_children);
     param_formats.resize(bind_schema->n_children, kPgBinaryFormat);
     bind_field_writers.resize(bind_schema->n_children);
+    is_null_param.resize(bind_schema->n_children);
 
     for (size_t i = 0; i < bind_field_writers.size(); i++) {
       PostgresType type;
@@ -238,8 +241,6 @@ struct BindStream {
                                   int result_format) {
     param_buffer->size_bytes = 0;
     int64_t last_offset = 0;
-    std::vector<bool> is_null_param(array_view->n_children);
-
     for (int64_t col = 0; col < array_view->n_children; col++) {
       is_null_param[col] = ArrowArrayViewIsNull(array_view->children[col], current_row);
 
