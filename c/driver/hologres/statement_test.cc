@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 #include <arrow-adbc/adbc.h>
+#include <nanoarrow/nanoarrow.hpp>
 
 #include "connection.h"
 #include "statement.h"
@@ -502,6 +503,114 @@ TEST_F(HologresStatementTest, SetOptionDoubleNotImplemented) {
 TEST_F(HologresStatementTest, SetOptionIntUnknownKey) {
   EXPECT_EQ(stmt_->SetOptionInt("unknown.key", 42, &error_),
             ADBC_STATUS_NOT_IMPLEMENTED);
+  TearDownError();
+}
+
+// ---------------------------------------------------------------------------
+// SetOption: ADBC_HOLOGRES_OPTION_COPY_FORMAT
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresStatementTest, SetOptionCopyFormatBinary) {
+  EXPECT_EQ(stmt_->SetOption(ADBC_HOLOGRES_OPTION_COPY_FORMAT, "binary", &error_),
+            ADBC_STATUS_OK);
+  EXPECT_EQ(GetOptionString(ADBC_HOLOGRES_OPTION_COPY_FORMAT), "binary");
+  TearDownError();
+}
+
+TEST_F(HologresStatementTest, SetOptionCopyFormatArrow) {
+  EXPECT_EQ(stmt_->SetOption(ADBC_HOLOGRES_OPTION_COPY_FORMAT, "arrow", &error_),
+            ADBC_STATUS_OK);
+  EXPECT_EQ(GetOptionString(ADBC_HOLOGRES_OPTION_COPY_FORMAT), "arrow");
+  TearDownError();
+}
+
+TEST_F(HologresStatementTest, SetOptionCopyFormatArrowLz4) {
+  EXPECT_EQ(stmt_->SetOption(ADBC_HOLOGRES_OPTION_COPY_FORMAT, "arrow_lz4", &error_),
+            ADBC_STATUS_OK);
+  EXPECT_EQ(GetOptionString(ADBC_HOLOGRES_OPTION_COPY_FORMAT), "arrow_lz4");
+  TearDownError();
+}
+
+TEST_F(HologresStatementTest, SetOptionCopyFormatInvalid) {
+  EXPECT_EQ(stmt_->SetOption(ADBC_HOLOGRES_OPTION_COPY_FORMAT, "csv", &error_),
+            ADBC_STATUS_INVALID_ARGUMENT);
+  TearDownError();
+}
+
+TEST_F(HologresStatementTest, GetOptionCopyFormatDefault) {
+  EXPECT_EQ(GetOptionString(ADBC_HOLOGRES_OPTION_COPY_FORMAT), "binary");
+}
+
+// ---------------------------------------------------------------------------
+// ExecuteQuery guards
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresStatementTest, ExecuteQueryWithoutQuery) {
+  // No SetSqlQuery and no ingest target → INVALID_STATE
+  EXPECT_EQ(stmt_->ExecuteQuery(nullptr, nullptr, &error_), ADBC_STATUS_INVALID_STATE);
+  TearDownError();
+}
+
+TEST_F(HologresStatementTest, ExecuteIngestWithoutBind) {
+  // Set ingest target but no Bind → INVALID_STATE
+  stmt_->SetOption(ADBC_INGEST_OPTION_TARGET_TABLE, "test_table", &error_);
+  TearDownError();
+  EXPECT_EQ(stmt_->ExecuteQuery(nullptr, nullptr, &error_), ADBC_STATUS_INVALID_STATE);
+  TearDownError();
+}
+
+TEST_F(HologresStatementTest, ExecuteSchemaWithoutQuery) {
+  struct ArrowSchema schema;
+  std::memset(&schema, 0, sizeof(schema));
+  EXPECT_EQ(stmt_->ExecuteSchema(&schema, &error_), ADBC_STATUS_INVALID_STATE);
+  TearDownError();
+}
+
+// ---------------------------------------------------------------------------
+// GetParameterSchema guard
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresStatementTest, GetParameterSchemaWithoutQuery) {
+  struct ArrowSchema schema;
+  std::memset(&schema, 0, sizeof(schema));
+  EXPECT_EQ(stmt_->GetParameterSchema(&schema, &error_), ADBC_STATUS_INVALID_STATE);
+  TearDownError();
+}
+
+// ---------------------------------------------------------------------------
+// Bind with valid array + schema
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresStatementTest, BindValidArrayAndSchema) {
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ArrowSchemaSetTypeStruct(schema.get(), 1);
+  ArrowSchemaSetType(schema->children[0], NANOARROW_TYPE_INT32);
+  ArrowSchemaSetName(schema->children[0], "col");
+
+  nanoarrow::UniqueArray array;
+  ArrowArrayInitFromSchema(array.get(), schema.get(), nullptr);
+  ArrowArrayStartAppending(array.get());
+  ArrowArrayAppendInt(array->children[0], 42);
+  ArrowArrayFinishElement(array.get());
+  ArrowArrayFinishBuildingDefault(array.get(), nullptr);
+
+  EXPECT_EQ(stmt_->Bind(array.get(), schema.get(), &error_), ADBC_STATUS_OK);
+  TearDownError();
+}
+
+// ---------------------------------------------------------------------------
+// Release lifecycle
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresStatementTest, ReleaseMultipleTimes) {
+  HologresStatement stmt;
+  ASSERT_EQ(stmt.New(&adbc_conn_, &error_), ADBC_STATUS_OK);
+  TearDownError();
+  EXPECT_EQ(stmt.Release(&error_), ADBC_STATUS_OK);
+  TearDownError();
+  // Second release should also succeed (idempotent)
+  EXPECT_EQ(stmt.Release(&error_), ADBC_STATUS_OK);
   TearDownError();
 }
 

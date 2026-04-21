@@ -206,7 +206,7 @@ TEST(PostgresTypeTest, PostgresTypeSetSchema) {
   ArrowSchemaInit(schema.get());
   EXPECT_EQ(PostgresType(PostgresTypeId::kInterval).SetSchema(schema.get()),
             NANOARROW_OK);
-  EXPECT_STREQ(schema->format, "tDn");
+  EXPECT_STREQ(schema->format, "tin");
   schema.reset();
 
   ArrowSchemaInit(schema.get());

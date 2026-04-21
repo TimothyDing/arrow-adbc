@@ -313,4 +313,28 @@ TEST_F(HologresDatabaseTest, ConstructorDefaults) {
   EXPECT_EQ(db_->PostgresVersion()[0], 0);
 }
 
+TEST_F(HologresDatabaseTest, SetOptionUriOverwrite) {
+  db_->SetOption(ADBC_OPTION_URI, "postgres://host1/db1", &error_);
+  TearDownError();
+  db_->SetOption(ADBC_OPTION_URI, "postgres://host2/db2", &error_);
+  TearDownError();
+  EXPECT_EQ(db_->uri(), "postgres://host2/db2");
+}
+
+TEST_F(HologresDatabaseTest, GetOptionUriEmpty) {
+  char buf[64] = {};
+  size_t length = sizeof(buf);
+  EXPECT_EQ(db_->GetOption(ADBC_OPTION_URI, buf, &length, &error_), ADBC_STATUS_OK);
+  EXPECT_STREQ(buf, "");
+  EXPECT_EQ(length, 1u);  // just null terminator
+  TearDownError();
+}
+
+TEST_F(HologresDatabaseTest, ReleaseMultipleTimes) {
+  EXPECT_EQ(db_->Release(&error_), ADBC_STATUS_OK);
+  TearDownError();
+  EXPECT_EQ(db_->Release(&error_), ADBC_STATUS_OK);
+  TearDownError();
+}
+
 }  // namespace adbchg

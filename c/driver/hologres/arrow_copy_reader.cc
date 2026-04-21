@@ -427,7 +427,8 @@ const char* ArrowCopyReader::GetLastErrorTrampoline(struct ArrowArrayStream* sel
 }
 
 void ArrowCopyReader::ReleaseTrampoline(struct ArrowArrayStream* self) {
-  if (self && self->private_data) {
+  if (!self) return;
+  if (self->private_data) {
     delete static_cast<std::weak_ptr<ArrowCopyReader>*>(self->private_data);
     self->private_data = nullptr;
   }

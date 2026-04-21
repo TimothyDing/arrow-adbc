@@ -123,4 +123,53 @@ TEST_F(HologresConnectionTest, InitDatabaseWithNullPrivateData) {
   TearDownError();
 }
 
+// ---------------------------------------------------------------------------
+// GetOption: autocommit (doesn't require PGconn)
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresConnectionTest, GetOptionAutocommit) {
+  char buf[64] = {};
+  size_t length = sizeof(buf);
+  EXPECT_EQ(conn_->GetOption(ADBC_CONNECTION_OPTION_AUTOCOMMIT, buf, &length, &error_),
+            ADBC_STATUS_OK);
+  EXPECT_STREQ(buf, ADBC_OPTION_VALUE_ENABLED);
+  TearDownError();
+}
+
+TEST_F(HologresConnectionTest, GetOptionUnknown) {
+  char buf[64] = {};
+  size_t length = sizeof(buf);
+  EXPECT_EQ(conn_->GetOption("unknown.option", buf, &length, &error_),
+            ADBC_STATUS_NOT_FOUND);
+  TearDownError();
+}
+
+// ---------------------------------------------------------------------------
+// Release without Init (conn_ and cancel_ are null)
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresConnectionTest, ReleaseWithoutInit) {
+  EXPECT_EQ(conn_->Release(&error_), ADBC_STATUS_OK);
+  TearDownError();
+}
+
+TEST_F(HologresConnectionTest, ReleaseMultipleTimes) {
+  EXPECT_EQ(conn_->Release(&error_), ADBC_STATUS_OK);
+  TearDownError();
+  // Second release should also succeed (idempotent)
+  EXPECT_EQ(conn_->Release(&error_), ADBC_STATUS_OK);
+  TearDownError();
+}
+
+// ---------------------------------------------------------------------------
+// SetOption: autocommit enabled + invalid
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresConnectionTest, SetOptionAutocommitNonDisabledAccepted) {
+  // Any value that is not "disabled" is accepted (Hologres is always autocommit)
+  EXPECT_EQ(conn_->SetOption(ADBC_CONNECTION_OPTION_AUTOCOMMIT, "maybe", &error_),
+            ADBC_STATUS_OK);
+  TearDownError();
+}
+
 }  // namespace adbchg

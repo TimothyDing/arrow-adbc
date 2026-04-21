@@ -69,6 +69,7 @@ class ArrowCopyReader final : public std::enable_shared_from_this<ArrowCopyReade
 
  private:
   friend class HologresStatement;
+  friend class ArrowCopyReaderTestHelper;
 
   // Buffer management for PQgetCopyData
   int FillBuffer();

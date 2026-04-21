@@ -115,6 +115,8 @@ if(ADBC_BUILD_TESTS)
                 adbc_driver_common
                 ${TEST_LINK_LIBS})
   target_compile_features(adbc-driver-hologres-database-test PRIVATE cxx_std_17)
+  target_compile_definitions(adbc-driver-hologres-database-test PRIVATE
+                             ADBC_HOLOGRES_VERSION="${ADBC_BASE_VERSION}")
   target_include_directories(adbc-driver-hologres-database-test SYSTEM
                              PRIVATE ${REPOSITORY_ROOT}/c/
                                      ${REPOSITORY_ROOT}/c/include/
@@ -226,6 +228,27 @@ if(ADBC_BUILD_TESTS)
   )
   adbc_configure_target(adbc-driver-hologres-copy-test)
 
+  add_test_case(driver_hologres_copy_writer_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                copy_writer_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                adbc_validation
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-copy-writer-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-copy-writer-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-copy-writer-test)
+
   add_test_case(driver_hologres_error_test
                 PREFIX
                 adbc
@@ -245,4 +268,47 @@ if(ADBC_BUILD_TESTS)
                                      ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
   )
   adbc_configure_target(adbc-driver-hologres-error-test)
+
+  add_test_case(driver_hologres_arrow_copy_reader_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                arrow_copy_reader_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                adbc_validation
+                ${TEST_LINK_LIBS}
+                ${LZ4_LINK_LIBRARIES})
+  target_compile_features(adbc-driver-hologres-arrow-copy-reader-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-arrow-copy-reader-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${LZ4_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-arrow-copy-reader-test)
+
+  add_test_case(driver_hologres_bind_stream_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                bind_stream_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-bind-stream-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-bind-stream-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-bind-stream-test)
 endif()

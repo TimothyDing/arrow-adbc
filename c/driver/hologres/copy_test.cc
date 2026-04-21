@@ -473,4 +473,599 @@ TEST(CopyReaderTest, MakeFieldReaderUnsupportedConversion) {
   EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), EINVAL);
 }
 
+// ---------------------------------------------------------------------------
+// Read Date
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadDate) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kDate));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyDate, sizeof(kTestPgCopyDate)), NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 3);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 3);
+  auto* data = reinterpret_cast<const int32_t*>(col->buffers[1]);
+  // 1900-01-01: PG=-36524, Arrow=-36524+10957=-25567
+  EXPECT_EQ(data[0], -25567);
+  // 2100-01-01: PG=36525, Arrow=36525+10957=47482
+  EXPECT_EQ(data[1], 47482);
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read Time
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadTime) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kTime));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyTime, sizeof(kTestPgCopyTime)), NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 4);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 4);
+  auto* data = reinterpret_cast<const int64_t*>(col->buffers[1]);
+  // 00:00:00 → 0 µs
+  EXPECT_EQ(data[0], 0);
+  // 23:59:59 → 86399000000 µs
+  EXPECT_EQ(data[1], 86399000000LL);
+  // 13:42:56.123456 → 49376123456 µs
+  EXPECT_EQ(data[2], 49376123456LL);
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read Timestamp
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadTimestamp) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kTimestamp));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyTimestamp, sizeof(kTestPgCopyTimestamp)),
+            NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 3);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 3);
+  // Values have kPostgresTimestampEpoch (946684800000000) added
+  auto* data = reinterpret_cast<const int64_t*>(col->buffers[1]);
+  // 1900-01-01 12:34:56 and 2100-01-01 12:34:56 - both non-null
+  EXPECT_NE(data[0], 0);
+  EXPECT_NE(data[1], 0);
+  EXPECT_GT(data[1], data[0]);  // 2100 > 1900
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read Interval
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadInterval) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kInterval));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyInterval, sizeof(kTestPgCopyInterval)),
+            NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 3);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 3);
+  // Arrow interval_month_day_nano: {months(i32), days(i32), time_ns(i64)}
+  auto* buf = reinterpret_cast<const uint8_t*>(col->buffers[1]);
+
+  // Row 0: -1 months, -2 days, -4 seconds = -4000000 µs = -4000000000 ns
+  int32_t months0, days0;
+  int64_t ns0;
+  std::memcpy(&months0, buf + 0, 4);
+  std::memcpy(&days0, buf + 4, 4);
+  std::memcpy(&ns0, buf + 8, 8);
+  EXPECT_EQ(months0, -1);
+  EXPECT_EQ(days0, -2);
+  EXPECT_EQ(ns0, -4000000000LL);
+
+  // Row 1: 1 months, 2 days, 4 seconds = 4000000 µs = 4000000000 ns
+  int32_t months1, days1;
+  int64_t ns1;
+  std::memcpy(&months1, buf + 16, 4);
+  std::memcpy(&days1, buf + 20, 4);
+  std::memcpy(&ns1, buf + 24, 8);
+  EXPECT_EQ(months1, 1);
+  EXPECT_EQ(days1, 2);
+  EXPECT_EQ(ns1, 4000000000LL);
+
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read Numeric (output as string)
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadNumeric) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kNumeric));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyNumeric, sizeof(kTestPgCopyNumeric)), NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 9);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 9);
+  // Numeric is read as STRING; verify via offsets + data buffers
+  auto* offsets = reinterpret_cast<const int32_t*>(col->buffers[1]);
+  auto* str_data = reinterpret_cast<const char*>(col->buffers[2]);
+
+  auto get_str = [&](int64_t i) -> std::string {
+    return std::string(str_data + offsets[i], offsets[i + 1] - offsets[i]);
+  };
+
+  EXPECT_EQ(get_str(0), "1000000");
+  EXPECT_EQ(get_str(1), "0.00001234");
+  EXPECT_EQ(get_str(2), "1.0000");
+  EXPECT_EQ(get_str(3), "-123.456");
+  EXPECT_EQ(get_str(4), "123.456");
+  EXPECT_EQ(get_str(5), "nan");
+  EXPECT_EQ(get_str(6), "-inf");
+  EXPECT_EQ(get_str(7), "inf");
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read JSONB
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadJsonb) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kJsonb));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyJsonb, sizeof(kTestPgCopyJsonb)), NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 3);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 3);
+  // JSONB reader strips the 0x01 version prefix
+  auto* offsets = reinterpret_cast<const int32_t*>(col->buffers[1]);
+  auto* str_data = reinterpret_cast<const char*>(col->buffers[2]);
+
+  auto get_str = [&](int64_t i) -> std::string {
+    return std::string(str_data + offsets[i], offsets[i + 1] - offsets[i]);
+  };
+
+  EXPECT_EQ(get_str(0), "[1, 2, 3]");
+  EXPECT_EQ(get_str(1), "[4, 5, 6]");
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read JSON (plain, no version prefix)
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadJson) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kJson));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyJson, sizeof(kTestPgCopyJson)), NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 3);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 3);
+  auto* offsets = reinterpret_cast<const int32_t*>(col->buffers[1]);
+  auto* str_data = reinterpret_cast<const char*>(col->buffers[2]);
+
+  auto get_str = [&](int64_t i) -> std::string {
+    return std::string(str_data + offsets[i], offsets[i + 1] - offsets[i]);
+  };
+
+  EXPECT_EQ(get_str(0), "[1, 2, 3]");
+  EXPECT_EQ(get_str(1), "[4, 5, 6]");
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read Enum (as string)
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadEnum) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kEnum));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyEnum, sizeof(kTestPgCopyEnum)), NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 3);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 3);
+  auto* offsets = reinterpret_cast<const int32_t*>(col->buffers[1]);
+  auto* str_data = reinterpret_cast<const char*>(col->buffers[2]);
+
+  auto get_str = [&](int64_t i) -> std::string {
+    return std::string(str_data + offsets[i], offsets[i + 1] - offsets[i]);
+  };
+
+  EXPECT_EQ(get_str(0), "ok");
+  EXPECT_EQ(get_str(1), "sad");
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read Integer Array
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadIntegerArray) {
+  // Array<Int4> column
+  PostgresType array_type = PostgresType(PostgresTypeId::kInt4).Array(0, "_int4");
+  PostgresType record(PostgresTypeId::kRecord);
+  record.AppendChild("col", array_type);
+
+  CopyReaderTester tester(record);
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyIntegerArray, sizeof(kTestPgCopyIntegerArray)),
+            NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 3);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* list_col = array->children[0];
+  EXPECT_EQ(list_col->length, 3);
+  EXPECT_EQ(list_col->null_count, 1);
+
+  // Check the child values: {-123, -1} and {0, 1, 123}
+  auto* values = list_col->children[0];
+  auto* offsets = reinterpret_cast<const int32_t*>(list_col->buffers[1]);
+  auto* int_data = reinterpret_cast<const int32_t*>(values->buffers[1]);
+
+  // First list: {-123, -1}
+  EXPECT_EQ(offsets[0], 0);
+  EXPECT_EQ(offsets[1], 2);
+  EXPECT_EQ(int_data[0], -123);
+  EXPECT_EQ(int_data[1], -1);
+
+  // Second list: {0, 1, 123}
+  EXPECT_EQ(offsets[2], 5);
+  EXPECT_EQ(int_data[2], 0);
+  EXPECT_EQ(int_data[3], 1);
+  EXPECT_EQ(int_data[4], 123);
+}
+
+// ---------------------------------------------------------------------------
+// Read Custom Record
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadCustomRecord) {
+  // Record with (int4, float8)
+  PostgresType inner_record(PostgresTypeId::kRecord);
+  inner_record.AppendChild("nested1", PostgresType(PostgresTypeId::kInt4));
+  inner_record.AppendChild("nested2", PostgresType(PostgresTypeId::kFloat8));
+
+  PostgresType outer_record(PostgresTypeId::kRecord);
+  outer_record.AppendChild("col", inner_record);
+
+  CopyReaderTester tester(outer_record);
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyCustomRecord, sizeof(kTestPgCopyCustomRecord)),
+            NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 3);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* struct_col = array->children[0];
+  EXPECT_EQ(struct_col->length, 3);
+  EXPECT_EQ(struct_col->null_count, 1);
+
+  // Check int4 child
+  auto* int_child = struct_col->children[0];
+  auto* int_data = reinterpret_cast<const int32_t*>(int_child->buffers[1]);
+  EXPECT_EQ(int_data[0], 123);
+  EXPECT_EQ(int_data[1], 12);
+
+  // Check float8 child
+  auto* dbl_child = struct_col->children[1];
+  auto* dbl_data = reinterpret_cast<const double*>(dbl_child->buffers[1]);
+  EXPECT_DOUBLE_EQ(dbl_data[0], 456.789);
+  EXPECT_DOUBLE_EQ(dbl_data[1], 345.678);
+}
+
+// ---------------------------------------------------------------------------
+// Schema inference - additional types
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, InferOutputSchemaDate) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kDate);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("PostgreSQL", nullptr), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ASSERT_EQ(reader.GetSchema(schema.get()), NANOARROW_OK);
+  EXPECT_STREQ(schema->children[0]->format, "tdD");
+}
+
+TEST(CopyReaderTest, InferOutputSchemaTime) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kTime);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("PostgreSQL", nullptr), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ASSERT_EQ(reader.GetSchema(schema.get()), NANOARROW_OK);
+  // Time64 microsecond: "ttu"
+  EXPECT_STREQ(schema->children[0]->format, "ttu");
+}
+
+TEST(CopyReaderTest, InferOutputSchemaInterval) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kInterval);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("PostgreSQL", nullptr), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ASSERT_EQ(reader.GetSchema(schema.get()), NANOARROW_OK);
+  EXPECT_STREQ(schema->children[0]->format, "tin");
+}
+
+TEST(CopyReaderTest, InferOutputSchemaNumeric) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kNumeric);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("PostgreSQL", nullptr), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ASSERT_EQ(reader.GetSchema(schema.get()), NANOARROW_OK);
+  // Numeric maps to string
+  EXPECT_STREQ(schema->children[0]->format, "u");
+}
+
+TEST(CopyReaderTest, InferOutputSchemaJsonb) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kJsonb);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("PostgreSQL", nullptr), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ASSERT_EQ(reader.GetSchema(schema.get()), NANOARROW_OK);
+  EXPECT_STREQ(schema->children[0]->format, "u");
+}
+
+// ---------------------------------------------------------------------------
+// MakeCopyFieldReader factory - additional types
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, MakeFieldReaderDate) {
+  PostgresType pg_type(PostgresTypeId::kDate);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_DATE32);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderTime) {
+  PostgresType pg_type(PostgresTypeId::kTime);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(ArrowSchemaSetTypeDateTime(schema.get(), NANOARROW_TYPE_TIME64,
+                                       NANOARROW_TIME_UNIT_MICRO, nullptr),
+            NANOARROW_OK);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderTimestamp) {
+  PostgresType pg_type(PostgresTypeId::kTimestamp);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(ArrowSchemaSetTypeDateTime(schema.get(), NANOARROW_TYPE_TIMESTAMP,
+                                       NANOARROW_TIME_UNIT_MICRO, nullptr),
+            NANOARROW_OK);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderTimestamptz) {
+  PostgresType pg_type(PostgresTypeId::kTimestamptz);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(ArrowSchemaSetTypeDateTime(schema.get(), NANOARROW_TYPE_TIMESTAMP,
+                                       NANOARROW_TIME_UNIT_MICRO, "UTC"),
+            NANOARROW_OK);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderInterval) {
+  PostgresType pg_type(PostgresTypeId::kInterval);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_INTERVAL_MONTH_DAY_NANO);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderNumeric) {
+  PostgresType pg_type(PostgresTypeId::kNumeric);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_STRING);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderJsonb) {
+  PostgresType pg_type(PostgresTypeId::kJsonb);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_STRING);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderJson) {
+  PostgresType pg_type(PostgresTypeId::kJson);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_STRING);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderEnum) {
+  PostgresType pg_type(PostgresTypeId::kEnum);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_STRING);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderArray) {
+  PostgresType array_type = PostgresType(PostgresTypeId::kInt4).Array(0, "_int4");
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_LIST);
+  ArrowSchemaInitFromType(schema->children[0], NANOARROW_TYPE_INT32);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(array_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderRecord) {
+  PostgresType record_type(PostgresTypeId::kRecord);
+  record_type.AppendChild("f1", PostgresType(PostgresTypeId::kInt4));
+  record_type.AppendChild("f2", PostgresType(PostgresTypeId::kFloat8));
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ArrowSchemaSetTypeStruct(schema.get(), 2);
+  ArrowSchemaInitFromType(schema->children[0], NANOARROW_TYPE_INT32);
+  ArrowSchemaSetName(schema->children[0], "f1");
+  ArrowSchemaInitFromType(schema->children[1], NANOARROW_TYPE_DOUBLE);
+  ArrowSchemaSetName(schema->children[1], "f2");
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(record_type, schema.get(), &reader, &error), NANOARROW_OK);
+  EXPECT_NE(reader, nullptr);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderRecordChildCountMismatch) {
+  PostgresType record_type(PostgresTypeId::kRecord);
+  record_type.AppendChild("f1", PostgresType(PostgresTypeId::kInt4));
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ArrowSchemaSetTypeStruct(schema.get(), 2);
+  ArrowSchemaInitFromType(schema->children[0], NANOARROW_TYPE_INT32);
+  ArrowSchemaSetName(schema->children[0], "f1");
+  ArrowSchemaInitFromType(schema->children[1], NANOARROW_TYPE_DOUBLE);
+  ArrowSchemaSetName(schema->children[1], "f2");
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(record_type, schema.get(), &reader, &error), EINVAL);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderArrayChildCountInvalid) {
+  // Array type with no children should error
+  PostgresType bad_array(PostgresTypeId::kArray);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_LIST);
+  ArrowSchemaInitFromType(schema->children[0], NANOARROW_TYPE_INT32);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(bad_array, schema.get(), &reader, &error), EINVAL);
+}
+
+// ---------------------------------------------------------------------------
+// Read Numeric with precision/scale (NUMERIC(16,10))
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadNumericWithPrecision) {
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kNumeric));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyNumeric16_10, sizeof(kTestPgCopyNumeric16_10)),
+            NANOARROW_OK);
+
+  auto* array = tester.array();
+  ASSERT_EQ(array->length, 7);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  EXPECT_EQ(col->length, 7);
+  auto* offsets = reinterpret_cast<const int32_t*>(col->buffers[1]);
+  auto* str_data = reinterpret_cast<const char*>(col->buffers[2]);
+
+  auto get_str = [&](int64_t i) -> std::string {
+    return std::string(str_data + offsets[i], offsets[i + 1] - offsets[i]);
+  };
+
+  EXPECT_EQ(get_str(0), "0.0000000000");
+  EXPECT_EQ(get_str(1), "1.0123400000");
+  EXPECT_EQ(get_str(2), "1.0123456789");
+  EXPECT_EQ(get_str(3), "-1.0123400000");
+  EXPECT_EQ(get_str(4), "-1.0123456789");
+  EXPECT_EQ(get_str(5), "nan");
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Read multiple record types via GetArray lifecycle
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, GetArrayWithoutRecord) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kBool);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("PostgreSQL", nullptr), NANOARROW_OK);
+  ASSERT_EQ(reader.InitFieldReaders(nullptr), NANOARROW_OK);
+
+  // GetArray without reading any records should return EINVAL
+  nanoarrow::UniqueArray array;
+  ArrowError error;
+  EXPECT_EQ(reader.GetArray(array.get(), &error), EINVAL);
+}
+
 }  // namespace adbcpq
