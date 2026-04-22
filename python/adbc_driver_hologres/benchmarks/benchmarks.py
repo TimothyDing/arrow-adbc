@@ -291,6 +291,10 @@ class HologresMultiColumnSuite(HologresBenchmarkBase):
     param_names = list(param_data.keys())
     params = list(param_data.values())
 
+    # TEXT[] at 10M rows (4 columns) exceeds memory during data generation,
+    # causing OOM that kills the setup_cache subprocess and skips ALL benchmarks.
+    _MAX_TEXT_ARRAY_ROWS = 1_000_000
+
     def setup_cache(self) -> None:
         """Create test tables with data."""
         self.uri = os.environ.get("ADBC_HOLOGRES_TEST_URI")
@@ -300,6 +304,11 @@ class HologresMultiColumnSuite(HologresBenchmarkBase):
         with psycopg.connect(self.uri, autocommit=True) as conn:
             with conn.cursor() as cursor:
                 for row_count, data_type in itertools.product(*self.params):
+                    if (
+                        data_type == "TEXT[]"
+                        and row_count > self._MAX_TEXT_ARRAY_ROWS
+                    ):
+                        continue
                     table_name = self._make_table_name(row_count, data_type)
                     for query in self.SETUP_QUERIES:
                         try:
@@ -367,6 +376,13 @@ class HologresMultiColumnSuite(HologresBenchmarkBase):
                 cursor.adbc_ingest(table_name, table, mode="append")
         finally:
             conn.close()
+
+    def setup(self, row_count: int, data_type: str) -> None:
+        if data_type == "TEXT[]" and row_count > self._MAX_TEXT_ARRAY_ROWS:
+            raise NotImplementedError(
+                f"TEXT[] not benchmarked at {row_count} rows (OOM)"
+            )
+        super().setup(row_count, data_type)
 
     def _make_table_name(self, row_count: int, data_type: str) -> str:
         return (
@@ -703,6 +719,11 @@ class HologresVectorIngestSuite:
             del self.test_data
         gc.collect()
 
+    # COPY binary builds the entire data stream in memory; at 10M rows with
+    # 512/1024-dim float32 vectors this exceeds available memory.
+    # Stage mode uses chunked Arrow IPC and handles 10M rows fine.
+    _copy_row_params = [[512, 1024], [10_000, 100_000, 1_000_000]]
+
     def time_ingest_adbc(self, vector_dim: int, row_count: int) -> None:
         """Benchmark ADBC COPY ingest of vector data."""
         table_name = f"{self.table_base}_adbc"
@@ -711,6 +732,8 @@ class HologresVectorIngestSuite:
             cursor.adbc_ingest(
                 table_name, self.test_data, mode="create_append"
             )
+
+    time_ingest_adbc.params = _copy_row_params
 
     def time_ingest_adbc_on_conflict_ignore(
         self, vector_dim: int, row_count: int
@@ -726,6 +749,8 @@ class HologresVectorIngestSuite:
                 table_name, self.test_data, mode="create_append"
             )
 
+    time_ingest_adbc_on_conflict_ignore.params = _copy_row_params
+
     def time_ingest_adbc_on_conflict_update(
         self, vector_dim: int, row_count: int
     ) -> None:
@@ -739,6 +764,8 @@ class HologresVectorIngestSuite:
             cursor.adbc_ingest(
                 table_name, self.test_data, mode="create_append"
             )
+
+    time_ingest_adbc_on_conflict_update.params = _copy_row_params
 
     def time_ingest_adbc_stage(
         self, vector_dim: int, row_count: int
