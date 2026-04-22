@@ -538,7 +538,7 @@ TEST_F(HologresStatementTest, SetOptionCopyFormatInvalid) {
 }
 
 TEST_F(HologresStatementTest, GetOptionCopyFormatDefault) {
-  EXPECT_EQ(GetOptionString(ADBC_HOLOGRES_OPTION_COPY_FORMAT), "binary");
+  EXPECT_EQ(GetOptionString(ADBC_HOLOGRES_OPTION_COPY_FORMAT), "arrow_lz4");
 }
 
 // ---------------------------------------------------------------------------

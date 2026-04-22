@@ -185,7 +185,7 @@ class HologresStatement {
 
   // Options
   bool use_copy_;
-  CopyFormat copy_format_ = CopyFormat::kBinary;
+  CopyFormat copy_format_ = CopyFormat::kArrowLz4;
 
   struct {
     std::string db_schema;
