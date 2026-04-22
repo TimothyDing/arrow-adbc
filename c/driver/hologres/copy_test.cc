@@ -1023,4 +1023,194 @@ TEST(CopyReaderTest, GetArrayWithoutRecord) {
   EXPECT_EQ(reader.GetArray(array.get(), &error), EINVAL);
 }
 
+// ---------------------------------------------------------------------------
+// JSONB version byte edge cases
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadJsonbWrongVersionByte) {
+  // Manually construct binary COPY data with version byte != 1
+  // PG COPY header + 1 field row with JSONB data using version byte 0x02
+  static const uint8_t kTestPgCopyJsonbBadVersion[] = {
+      0x50, 0x47, 0x43, 0x4f, 0x50, 0x59, 0x0a, 0xff, 0x0d, 0x0a, 0x00,  // signature
+      0x00, 0x00, 0x00, 0x00,  // flags
+      0x00, 0x00, 0x00, 0x00,  // extension length
+      0x00, 0x01,              // field count = 1
+      0x00, 0x00, 0x00, 0x04,  // field length = 4
+      0x02,                    // WRONG version byte (should be 0x01)
+      0x7b, 0x7d, 0x0a,       // {}  + newline (garbage after version)
+      0xff, 0xff               // trailer
+  };
+
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kJsonb));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  // The reader sets an error message but returns NANOARROW_OK (current behavior)
+  // This exercises the version byte check code path
+  tester.ReadAll(kTestPgCopyJsonbBadVersion, sizeof(kTestPgCopyJsonbBadVersion));
+}
+
+// ---------------------------------------------------------------------------
+// Numeric special values (NaN, +Inf, -Inf)
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadNumericSpecialValues) {
+  // kTestPgCopyNumeric contains: 1000000, 0.00001234, 1.0000, -123.456,
+  // 123.456, NaN, -Inf, +Inf, NULL
+  CopyReaderTester tester(MakeRecordType(PostgresTypeId::kNumeric));
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyNumeric, sizeof(kTestPgCopyNumeric)), NANOARROW_OK);
+
+  struct ArrowArray* array = tester.array();
+  ASSERT_EQ(array->length, 9);
+  ASSERT_EQ(array->n_children, 1);
+
+  auto* col = array->children[0];
+  auto get_str = [&](int64_t i) -> std::string {
+    auto* offsets =
+        reinterpret_cast<const int32_t*>(col->buffers[1]);
+    auto* data = reinterpret_cast<const char*>(col->buffers[2]);
+    return std::string(data + offsets[i], offsets[i + 1] - offsets[i]);
+  };
+
+  EXPECT_EQ(get_str(0), "1000000");
+  EXPECT_EQ(get_str(1), "0.00001234");
+  EXPECT_EQ(get_str(2), "1.0000");
+  EXPECT_EQ(get_str(3), "-123.456");
+  EXPECT_EQ(get_str(4), "123.456");
+  // Special values
+  EXPECT_EQ(get_str(5), "nan");
+  EXPECT_EQ(get_str(6), "-inf");
+  EXPECT_EQ(get_str(7), "inf");
+  // Index 8 is NULL
+  EXPECT_EQ(col->null_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Array with zero dimensions (empty array)
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadArrayZeroDim) {
+  // PG COPY binary for an empty int4 array (ndim=0)
+  static const uint8_t kTestPgCopyArrayEmpty[] = {
+      0x50, 0x47, 0x43, 0x4f, 0x50, 0x59, 0x0a, 0xff, 0x0d, 0x0a, 0x00,  // signature
+      0x00, 0x00, 0x00, 0x00,  // flags
+      0x00, 0x00, 0x00, 0x00,  // extension length
+      0x00, 0x01,              // field count = 1
+      0x00, 0x00, 0x00, 0x0c,  // field length = 12
+      0x00, 0x00, 0x00, 0x00,  // ndim = 0
+      0x00, 0x00, 0x00, 0x00,  // has_null flags = 0
+      0x00, 0x00, 0x00, 0x17,  // element OID = 23 (int4)
+      0xff, 0xff               // trailer
+  };
+
+  PostgresType array_type = PostgresType(PostgresTypeId::kInt4).Array(0, "_int4");
+  PostgresType record(PostgresTypeId::kRecord);
+  record.AppendChild("col", array_type);
+
+  CopyReaderTester tester(record);
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  ASSERT_EQ(tester.ReadAll(kTestPgCopyArrayEmpty, sizeof(kTestPgCopyArrayEmpty)),
+            NANOARROW_OK);
+
+  struct ArrowArray* array = tester.array();
+  ASSERT_EQ(array->length, 1);
+  // The single row should be an empty list
+  auto* list_col = array->children[0];
+  auto* offsets = reinterpret_cast<const int32_t*>(list_col->buffers[1]);
+  EXPECT_EQ(offsets[0], 0);
+  EXPECT_EQ(offsets[1], 0);  // empty list
+}
+
+// ---------------------------------------------------------------------------
+// Array with negative dimensions (error path)
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, ReadArrayNegativeDim) {
+  // PG COPY binary for array with ndim=-1 (should error)
+  static const uint8_t kTestPgCopyArrayNegDim[] = {
+      0x50, 0x47, 0x43, 0x4f, 0x50, 0x59, 0x0a, 0xff, 0x0d, 0x0a, 0x00,  // signature
+      0x00, 0x00, 0x00, 0x00,  // flags
+      0x00, 0x00, 0x00, 0x00,  // extension length
+      0x00, 0x01,              // field count = 1
+      0x00, 0x00, 0x00, 0x0c,  // field length = 12
+      0xff, 0xff, 0xff, 0xff,  // ndim = -1
+      0x00, 0x00, 0x00, 0x00,  // has_null flags
+      0x00, 0x00, 0x00, 0x17,  // element OID = 23 (int4)
+      0xff, 0xff               // trailer
+  };
+
+  PostgresType array_type = PostgresType(PostgresTypeId::kInt4).Array(0, "_int4");
+  PostgresType record(PostgresTypeId::kRecord);
+  record.AppendChild("col", array_type);
+
+  CopyReaderTester tester(record);
+  ASSERT_EQ(tester.Init(), NANOARROW_OK);
+  EXPECT_EQ(tester.ReadAll(kTestPgCopyArrayNegDim, sizeof(kTestPgCopyArrayNegDim)),
+            EINVAL);
+}
+
+// ---------------------------------------------------------------------------
+// MakeCopyFieldReader unsupported type combination
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, MakeFieldReaderUnsupportedTypeCombination) {
+  // Try to read a boolean PG type into a TIMESTAMP schema → ErrorCantConvert
+  PostgresType pg_type(PostgresTypeId::kBool);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ArrowSchemaSetTypeDateTime(schema.get(), NANOARROW_TYPE_TIMESTAMP,
+                             NANOARROW_TIME_UNIT_MICRO, nullptr);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), EINVAL);
+}
+
+TEST(CopyReaderTest, MakeFieldReaderTextToInt32) {
+  // Try to read a text PG type into INT32 schema → ErrorCantConvert
+  PostgresType pg_type(PostgresTypeId::kText);
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_INT32);
+
+  std::unique_ptr<PostgresCopyFieldReader> reader;
+  ArrowError error;
+  EXPECT_EQ(MakeCopyFieldReader(pg_type, schema.get(), &reader, &error), EINVAL);
+}
+
+// ---------------------------------------------------------------------------
+// InferOutputSchema: vendor name "Hologres" vs "PostgreSQL"
+// ---------------------------------------------------------------------------
+
+TEST(CopyReaderTest, InferOutputSchemaHologresVendor) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kJsonb);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("Hologres", nullptr), NANOARROW_OK);
+  nanoarrow::UniqueSchema schema;
+  ASSERT_EQ(reader.GetSchema(schema.get()), NANOARROW_OK);
+  // JSONB maps to STRING in both vendors
+  EXPECT_STREQ(schema->children[0]->format, "u");
+}
+
+TEST(CopyReaderTest, InferOutputSchemaTimestamptzHologres) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kTimestamptz);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("Hologres", nullptr), NANOARROW_OK);
+  nanoarrow::UniqueSchema schema;
+  ASSERT_EQ(reader.GetSchema(schema.get()), NANOARROW_OK);
+  // Timestamptz → TIMESTAMP with UTC timezone
+  EXPECT_STREQ(schema->children[0]->format, "tsu:UTC");
+}
+
+TEST(CopyReaderTest, InferOutputSchemaIntervalHologres) {
+  PostgresType record = MakeRecordType(PostgresTypeId::kInterval);
+  PostgresCopyStreamReader reader;
+  ASSERT_EQ(reader.Init(record), NANOARROW_OK);
+  ASSERT_EQ(reader.InferOutputSchema("Hologres", nullptr), NANOARROW_OK);
+  nanoarrow::UniqueSchema schema;
+  ASSERT_EQ(reader.GetSchema(schema.get()), NANOARROW_OK);
+  // Interval → INTERVAL_MONTH_DAY_NANO
+  EXPECT_STREQ(schema->children[0]->format, "tin");
+}
+
 }  // namespace adbcpq

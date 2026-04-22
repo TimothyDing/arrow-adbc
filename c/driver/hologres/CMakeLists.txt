@@ -292,6 +292,26 @@ if(ADBC_BUILD_TESTS)
   )
   adbc_configure_target(adbc-driver-hologres-arrow-copy-reader-test)
 
+  add_test_case(driver_hologres_result_helper_test
+                PREFIX
+                adbc
+                EXTRA_LABELS
+                driver-hologres
+                SOURCES
+                result_helper_test.cc
+                EXTRA_LINK_LIBS
+                adbc_driver_common
+                ${TEST_LINK_LIBS})
+  target_compile_features(adbc-driver-hologres-result-helper-test PRIVATE cxx_std_17)
+  target_include_directories(adbc-driver-hologres-result-helper-test SYSTEM
+                             PRIVATE ${REPOSITORY_ROOT}/c/
+                                     ${REPOSITORY_ROOT}/c/include/
+                                     ${LIBPQ_INCLUDE_DIRS}
+                                     ${REPOSITORY_ROOT}/c/driver
+                                     ${REPOSITORY_ROOT}/c/vendor/portable-snippets/include
+  )
+  adbc_configure_target(adbc-driver-hologres-result-helper-test)
+
   add_test_case(driver_hologres_bind_stream_test
                 PREFIX
                 adbc

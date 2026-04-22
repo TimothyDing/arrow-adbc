@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -199,5 +200,14 @@ class HologresStatement {
   std::shared_ptr<ArrowCopyReader> arrow_reader_;
   int64_t batch_size_hint_bytes_;
 };
+
+/// Function type for quoting SQL identifiers (e.g., PQescapeIdentifier wrapper).
+using QuoteIdentifierFn = std::function<std::string(const std::string&)>;
+
+/// Build a wrapper query that casts JSONB columns to TEXT for Arrow COPY.
+/// Returns empty string if no JSONB columns are found in root_type.
+std::string BuildJsonbWrapperQuery(const adbcpq::PostgresType& root_type,
+                                   const std::string& query,
+                                   const QuoteIdentifierFn& quote_identifier);
 
 }  // namespace adbchg

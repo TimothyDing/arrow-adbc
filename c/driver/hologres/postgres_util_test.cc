@@ -216,4 +216,115 @@ TEST(HandleTest, ResetExplicit) {
   // After reset, release should have been called
 }
 
+// ---------------------------------------------------------------------------
+// PqEscapedString
+// ---------------------------------------------------------------------------
+
+TEST(PqEscapedStringTest, DefaultConstructorIsNull) {
+  PqEscapedString s;
+  EXPECT_FALSE(static_cast<bool>(s));
+  EXPECT_EQ(s.c_str(), nullptr);
+}
+
+TEST(PqEscapedStringTest, ExplicitConstructorWithNull) {
+  PqEscapedString s(nullptr);
+  EXPECT_FALSE(static_cast<bool>(s));
+  EXPECT_EQ(s.c_str(), nullptr);
+}
+
+TEST(PqEscapedStringTest, MoveConstructor) {
+  // Use strdup to simulate a PQescapeIdentifier-allocated string
+  // (strdup uses malloc, and PQfreemem calls free on macOS/Linux)
+  char* raw = strdup("\"test\"");
+  PqEscapedString a(raw);
+  EXPECT_TRUE(static_cast<bool>(a));
+  EXPECT_STREQ(a.c_str(), "\"test\"");
+
+  PqEscapedString b(std::move(a));
+  EXPECT_TRUE(static_cast<bool>(b));
+  EXPECT_STREQ(b.c_str(), "\"test\"");
+  // a should be null after move
+  EXPECT_FALSE(static_cast<bool>(a));
+  EXPECT_EQ(a.c_str(), nullptr);
+}
+
+TEST(PqEscapedStringTest, MoveAssignment) {
+  char* raw1 = strdup("first");
+  char* raw2 = strdup("second");
+  PqEscapedString a(raw1);
+  PqEscapedString b(raw2);
+
+  b = std::move(a);
+  EXPECT_STREQ(b.c_str(), "first");
+  EXPECT_FALSE(static_cast<bool>(a));
+}
+
+TEST(PqEscapedStringTest, MoveAssignmentSelf) {
+  char* raw = strdup("self");
+  PqEscapedString a(raw);
+  // Suppress -Wself-move: we intentionally test self-move safety
+  PqEscapedString& ref = a;
+  a = std::move(ref);
+  // Self-move should be safe (no-op due to this != &other check)
+  EXPECT_TRUE(static_cast<bool>(a));
+  EXPECT_STREQ(a.c_str(), "self");
+}
+
+// ---------------------------------------------------------------------------
+// Float special values
+// ---------------------------------------------------------------------------
+
+TEST(LoadNetworkTest, Float8NaN) {
+  double nan_val = std::numeric_limits<double>::quiet_NaN();
+  uint64_t network = ToNetworkFloat8(nan_val);
+  EXPECT_TRUE(std::isnan(LoadNetworkFloat8(reinterpret_cast<const char*>(&network))));
+}
+
+TEST(LoadNetworkTest, Float8Infinity) {
+  double inf_val = std::numeric_limits<double>::infinity();
+  uint64_t network = ToNetworkFloat8(inf_val);
+  EXPECT_EQ(LoadNetworkFloat8(reinterpret_cast<const char*>(&network)), inf_val);
+}
+
+TEST(LoadNetworkTest, Float8NegativeInfinity) {
+  double neg_inf = -std::numeric_limits<double>::infinity();
+  uint64_t network = ToNetworkFloat8(neg_inf);
+  EXPECT_EQ(LoadNetworkFloat8(reinterpret_cast<const char*>(&network)), neg_inf);
+}
+
+TEST(LoadNetworkTest, Float4NaN) {
+  float nan_val = std::numeric_limits<float>::quiet_NaN();
+  uint32_t network = ToNetworkFloat4(nan_val);
+  uint32_t host = SwapNetworkToHost(network);
+  float result;
+  std::memcpy(&result, &host, sizeof(result));
+  EXPECT_TRUE(std::isnan(result));
+}
+
+// ---------------------------------------------------------------------------
+// Handle: ArrowArrayView specialization
+// ---------------------------------------------------------------------------
+
+TEST(HandleTest, ArrowArrayViewReleaser) {
+  Handle<struct ArrowArrayView> handle;
+  // Default state: storage_type is NANOARROW_TYPE_UNINITIALIZED
+  // Reset should be safe (no-op)
+  handle.reset();
+
+  // Initialize with a type
+  ArrowArrayViewInitFromType(&handle.value, NANOARROW_TYPE_INT32);
+  EXPECT_NE(handle.value.storage_type, NANOARROW_TYPE_UNINITIALIZED);
+  // Reset should call ArrowArrayViewReset
+  handle.reset();
+}
+
+TEST(HandleTest, DoubleReset) {
+  Handle<struct ArrowSchema> handle;
+  ArrowSchemaInit(&handle.value);
+  EXPECT_NE(handle.value.release, nullptr);
+  handle.reset();
+  // Second reset should be safe
+  handle.reset();
+}
+
 }  // namespace adbcpq

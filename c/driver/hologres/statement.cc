@@ -509,6 +509,32 @@ AdbcStatusCode HologresStatement::ExecuteBind(struct ArrowArrayStream* stream,
   return ADBC_STATUS_OK;
 }
 
+std::string BuildJsonbWrapperQuery(const adbcpq::PostgresType& root_type,
+                                   const std::string& query,
+                                   const QuoteIdentifierFn& quote_identifier) {
+  bool has_jsonb = false;
+  for (int64_t i = 0; i < root_type.n_children(); i++) {
+    if (root_type.child(i).type_id() == adbcpq::PostgresTypeId::kJsonb) {
+      has_jsonb = true;
+      break;
+    }
+  }
+  if (!has_jsonb) return {};
+
+  std::string select_list;
+  for (int64_t i = 0; i < root_type.n_children(); i++) {
+    if (i > 0) select_list += ", ";
+    std::string quoted = quote_identifier(root_type.child(i).field_name());
+    if (quoted.empty()) return {};
+    if (root_type.child(i).type_id() == adbcpq::PostgresTypeId::kJsonb) {
+      select_list += quoted + "::text AS " + quoted;
+    } else {
+      select_list += quoted;
+    }
+  }
+  return "SELECT " + select_list + " FROM (" + query + ") AS _adbc_jsonb_sub";
+}
+
 AdbcStatusCode HologresStatement::ExecuteQuery(struct ArrowArrayStream* stream,
                                                int64_t* rows_affected,
                                                struct AdbcError* error) {
@@ -555,24 +581,30 @@ AdbcStatusCode HologresStatement::ExecuteQuery(struct ArrowArrayStream* stream,
 
   // --- Arrow / Arrow_LZ4 COPY path ---
   if (copy_format_ != CopyFormat::kBinary) {
-    // JSONB is not supported in arrow/arrow_lz4 COPY format
-    for (int64_t i = 0; i < root_type.n_children(); i++) {
-      if (root_type.child(i).type_id() == adbcpq::PostgresTypeId::kJsonb) {
-        InternalAdbcSetError(error,
-                             "[hologres] Column '%s' has type JSONB which is not supported "
-                             "in arrow/arrow_lz4 COPY format. Cast JSONB columns to TEXT "
-                             "(e.g., column::text).",
-                             root_type.child(i).field_name().c_str());
-        return ADBC_STATUS_NOT_IMPLEMENTED;
-      }
-    }
-
     bool use_lz4 = (copy_format_ == CopyFormat::kArrowLz4);
     std::string format_str = use_lz4 ? "arrow_lz4" : "arrow";
 
     arrow_reader_ = std::make_shared<ArrowCopyReader>(connection_->conn(), use_lz4);
-    RAISE_STATUS(error, helper.ExecuteCopy(format_str));
-    arrow_reader_->result_ = helper.ReleaseResult();
+
+    // Hologres Arrow COPY doesn't natively support JSONB, so we wrap the query
+    // to cast JSONB columns to TEXT if any are detected.
+    PGconn* conn = connection_->conn();
+    std::string wrapper = BuildJsonbWrapperQuery(
+        root_type, query_, [conn](const std::string& name) -> std::string {
+          adbcpq::PqEscapedString escaped(
+              PQescapeIdentifier(conn, name.c_str(), name.size()));
+          return escaped ? std::string(escaped.c_str()) : std::string();
+        });
+
+    if (!wrapper.empty()) {
+      adbcpq::PqResultHelper copy_helper(conn, std::move(wrapper));
+      RAISE_STATUS(error, copy_helper.ExecuteCopy(format_str));
+      arrow_reader_->result_ = copy_helper.ReleaseResult();
+    } else {
+      RAISE_STATUS(error, helper.ExecuteCopy(format_str));
+      arrow_reader_->result_ = helper.ReleaseResult();
+    }
+
     arrow_reader_->ExportTo(stream);
     if (rows_affected) *rows_affected = -1;
     return ADBC_STATUS_OK;

@@ -17,6 +17,8 @@
 
 #include <cstring>
 #include <memory>
+#include <set>
+#include <string>
 
 #include <gtest/gtest.h>
 #include <arrow-adbc/adbc.h>
@@ -170,6 +172,102 @@ TEST_F(HologresConnectionTest, SetOptionAutocommitNonDisabledAccepted) {
   EXPECT_EQ(conn_->SetOption(ADBC_CONNECTION_OPTION_AUTOCOMMIT, "maybe", &error_),
             ADBC_STATUS_OK);
   TearDownError();
+}
+
+// ---------------------------------------------------------------------------
+// GetStatisticNames (no DB required)
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresConnectionTest, GetStatisticNames) {
+  struct ArrowArrayStream stream;
+  std::memset(&stream, 0, sizeof(stream));
+  EXPECT_EQ(conn_->GetStatisticNames(&stream, &error_), ADBC_STATUS_OK);
+  TearDownError();
+
+  // Read the schema
+  struct ArrowSchema schema;
+  std::memset(&schema, 0, sizeof(schema));
+  ASSERT_EQ(stream.get_schema(&stream, &schema), 0);
+
+  // Should have 2 columns: statistic_name (string) and statistic_key (int16)
+  EXPECT_EQ(schema.n_children, 2);
+  EXPECT_STREQ(schema.children[0]->name, "statistic_name");
+  EXPECT_STREQ(schema.children[0]->format, "u");
+  EXPECT_STREQ(schema.children[1]->name, "statistic_key");
+  EXPECT_STREQ(schema.children[1]->format, "s");
+
+  // Read next batch — should be empty (no rows)
+  struct ArrowArray array;
+  std::memset(&array, 0, sizeof(array));
+  ASSERT_EQ(stream.get_next(&stream, &array), 0);
+  // Empty result (no statistics defined)
+  if (array.release) {
+    EXPECT_EQ(array.length, 0);
+    array.release(&array);
+  }
+
+  if (schema.release) schema.release(&schema);
+  stream.release(&stream);
+}
+
+// ---------------------------------------------------------------------------
+// GetTableTypes (no DB required — uses static kPgTableTypes map)
+// ---------------------------------------------------------------------------
+
+TEST_F(HologresConnectionTest, GetTableTypes) {
+  // GetTableTypes does not use the AdbcConnection* parameter internally;
+  // it only reads the static kPgTableTypes map.  Pass a minimal struct.
+  struct AdbcConnection adbc_conn;
+  std::memset(&adbc_conn, 0, sizeof(adbc_conn));
+  // Create a shared_ptr on the stack and point private_data to it
+  // (mimics what HologresConnectionNew does).
+  auto shared = std::shared_ptr<HologresConnection>(conn_.get(),
+                                                    [](HologresConnection*) {});
+  adbc_conn.private_data = &shared;
+
+  struct ArrowArrayStream stream;
+  std::memset(&stream, 0, sizeof(stream));
+  EXPECT_EQ(conn_->GetTableTypes(&adbc_conn, &stream, &error_), ADBC_STATUS_OK);
+  TearDownError();
+
+  // Read schema
+  struct ArrowSchema schema;
+  std::memset(&schema, 0, sizeof(schema));
+  ASSERT_EQ(stream.get_schema(&stream, &schema), 0);
+
+  // Should have 1 column: table_type (string)
+  ASSERT_GE(schema.n_children, 1);
+  EXPECT_STREQ(schema.children[0]->name, "table_type");
+  EXPECT_STREQ(schema.children[0]->format, "u");
+
+  // Read rows — should contain the 6 table types from kPgTableTypes
+  struct ArrowArray array;
+  std::memset(&array, 0, sizeof(array));
+  ASSERT_EQ(stream.get_next(&stream, &array), 0);
+  ASSERT_NE(array.release, nullptr);
+
+  // kPgTableTypes has 6 entries: table, view, materialized_view,
+  // toast_table, foreign_table, partitioned_table
+  EXPECT_EQ(array.length, 6);
+
+  // Collect all values into a set
+  auto* col = array.children[0];
+  auto* offsets = reinterpret_cast<const int32_t*>(col->buffers[1]);
+  auto* data = reinterpret_cast<const char*>(col->buffers[2]);
+  std::set<std::string> types;
+  for (int64_t i = 0; i < array.length; i++) {
+    types.insert(std::string(data + offsets[i], offsets[i + 1] - offsets[i]));
+  }
+  EXPECT_TRUE(types.count("table"));
+  EXPECT_TRUE(types.count("view"));
+  EXPECT_TRUE(types.count("materialized_view"));
+  EXPECT_TRUE(types.count("toast_table"));
+  EXPECT_TRUE(types.count("foreign_table"));
+  EXPECT_TRUE(types.count("partitioned_table"));
+
+  array.release(&array);
+  if (schema.release) schema.release(&schema);
+  stream.release(&stream);
 }
 
 }  // namespace adbchg

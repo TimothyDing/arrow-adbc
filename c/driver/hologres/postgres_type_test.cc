@@ -480,4 +480,266 @@ TEST(PostgresTypeTest, FindArrayNotFound) {
   EXPECT_EQ(resolver.FindArray(999, &type, &error), EINVAL);
 }
 
+// ---------------------------------------------------------------------------
+// SetSchema: record (struct) type
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, SetSchemaRecord) {
+  PostgresType record(PostgresTypeId::kRecord);
+  record.AppendChild("a", PostgresType(PostgresTypeId::kInt4));
+  record.AppendChild("b", PostgresType(PostgresTypeId::kText));
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(record.SetSchema(schema.get()), NANOARROW_OK);
+
+  EXPECT_STREQ(schema->format, "+s");
+  ASSERT_EQ(schema->n_children, 2);
+  EXPECT_STREQ(schema->children[0]->format, "i");  // INT32
+  EXPECT_STREQ(schema->children[0]->name, "a");
+  EXPECT_STREQ(schema->children[1]->format, "u");  // STRING
+  EXPECT_STREQ(schema->children[1]->name, "b");
+}
+
+// ---------------------------------------------------------------------------
+// SetSchema: array (list) type
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, SetSchemaArray) {
+  PostgresType arr = PostgresType(PostgresTypeId::kInt4).Array(0, "_int4");
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(arr.SetSchema(schema.get()), NANOARROW_OK);
+
+  EXPECT_STREQ(schema->format, "+l");  // LIST
+  ASSERT_EQ(schema->n_children, 1);
+  EXPECT_STREQ(schema->children[0]->format, "i");  // INT32 child
+  EXPECT_STREQ(schema->children[0]->name, "item");
+}
+
+// ---------------------------------------------------------------------------
+// SetSchema: timestamptz with UTC timezone
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, SetSchemaTimestamptz) {
+  PostgresType ts(PostgresTypeId::kTimestamptz);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(ts.SetSchema(schema.get()), NANOARROW_OK);
+
+  EXPECT_STREQ(schema->format, "tsu:UTC");
+}
+
+// ---------------------------------------------------------------------------
+// SetSchema: interval
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, SetSchemaInterval) {
+  PostgresType interval(PostgresTypeId::kInterval);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(interval.SetSchema(schema.get()), NANOARROW_OK);
+
+  EXPECT_STREQ(schema->format, "tin");
+}
+
+// ---------------------------------------------------------------------------
+// SetSchema: user-defined type → BINARY with metadata
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, SetSchemaUserDefined) {
+  PostgresType ud =
+      PostgresType(PostgresTypeId::kUserDefined).WithPgTypeInfo(12345, "mytype");
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(ud.SetSchema(schema.get()), NANOARROW_OK);
+
+  EXPECT_STREQ(schema->format, "z");  // BINARY
+}
+
+// ---------------------------------------------------------------------------
+// SetSchema: int2vector → LIST of INT16
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, SetSchemaInt2vector) {
+  PostgresType iv(PostgresTypeId::kInt2vector);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(iv.SetSchema(schema.get()), NANOARROW_OK);
+
+  EXPECT_STREQ(schema->format, "+l");  // LIST
+  ASSERT_EQ(schema->n_children, 1);
+  EXPECT_STREQ(schema->children[0]->format, "s");  // INT16
+}
+
+// ---------------------------------------------------------------------------
+// sql_type_name()
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, SqlTypeNameScalar) {
+  PostgresType t = PostgresType(PostgresTypeId::kInt4).WithPgTypeInfo(23, "int4");
+  EXPECT_EQ(t.sql_type_name(), "int4");
+}
+
+TEST(PostgresTypeTest, SqlTypeNameArray) {
+  PostgresType arr =
+      PostgresType(PostgresTypeId::kInt4).WithPgTypeInfo(23, "int4").Array(1007, "_int4");
+  EXPECT_EQ(arr.sql_type_name(), "int4 ARRAY");
+}
+
+// ---------------------------------------------------------------------------
+// Unnamed() static factory
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, UnnamedTypeLargeOid) {
+  PostgresType t = PostgresType::Unnamed(99999);
+  EXPECT_EQ(t.type_id(), PostgresTypeId::kUnnamedArrowOpaque);
+  EXPECT_EQ(t.oid(), 99999u);
+  EXPECT_EQ(t.typname(), "unnamed<oid:99999>");
+}
+
+// ---------------------------------------------------------------------------
+// FromSchema: various Arrow types
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, FromSchemaBool) {
+  MockTypeResolver resolver;
+  ASSERT_EQ(resolver.Init(), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_BOOL);
+
+  PostgresType pg_type;
+  ArrowError error;
+  ASSERT_EQ(PostgresType::FromSchema(resolver, schema.get(), &pg_type, &error),
+            NANOARROW_OK);
+  EXPECT_EQ(pg_type.type_id(), PostgresTypeId::kBool);
+}
+
+TEST(PostgresTypeTest, FromSchemaDouble) {
+  MockTypeResolver resolver;
+  ASSERT_EQ(resolver.Init(), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_DOUBLE);
+
+  PostgresType pg_type;
+  ArrowError error;
+  ASSERT_EQ(PostgresType::FromSchema(resolver, schema.get(), &pg_type, &error),
+            NANOARROW_OK);
+  EXPECT_EQ(pg_type.type_id(), PostgresTypeId::kFloat8);
+}
+
+TEST(PostgresTypeTest, FromSchemaBinary) {
+  MockTypeResolver resolver;
+  ASSERT_EQ(resolver.Init(), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_BINARY);
+
+  PostgresType pg_type;
+  ArrowError error;
+  ASSERT_EQ(PostgresType::FromSchema(resolver, schema.get(), &pg_type, &error),
+            NANOARROW_OK);
+  EXPECT_EQ(pg_type.type_id(), PostgresTypeId::kBytea);
+}
+
+TEST(PostgresTypeTest, FromSchemaTimestampNoTz) {
+  MockTypeResolver resolver;
+  ASSERT_EQ(resolver.Init(), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(ArrowSchemaSetTypeDateTime(schema.get(), NANOARROW_TYPE_TIMESTAMP,
+                                       NANOARROW_TIME_UNIT_MICRO, nullptr),
+            NANOARROW_OK);
+
+  PostgresType pg_type;
+  ArrowError error;
+  ASSERT_EQ(PostgresType::FromSchema(resolver, schema.get(), &pg_type, &error),
+            NANOARROW_OK);
+  EXPECT_EQ(pg_type.type_id(), PostgresTypeId::kTimestamp);
+}
+
+TEST(PostgresTypeTest, FromSchemaTimestampWithTz) {
+  MockTypeResolver resolver;
+  ASSERT_EQ(resolver.Init(), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInit(schema.get());
+  ASSERT_EQ(ArrowSchemaSetTypeDateTime(schema.get(), NANOARROW_TYPE_TIMESTAMP,
+                                       NANOARROW_TIME_UNIT_MICRO, "UTC"),
+            NANOARROW_OK);
+
+  PostgresType pg_type;
+  ArrowError error;
+  ASSERT_EQ(PostgresType::FromSchema(resolver, schema.get(), &pg_type, &error),
+            NANOARROW_OK);
+  EXPECT_EQ(pg_type.type_id(), PostgresTypeId::kTimestamptz);
+}
+
+TEST(PostgresTypeTest, FromSchemaNullType) {
+  MockTypeResolver resolver;
+  ASSERT_EQ(resolver.Init(), NANOARROW_OK);
+
+  nanoarrow::UniqueSchema schema;
+  ArrowSchemaInitFromType(schema.get(), NANOARROW_TYPE_NA);
+
+  PostgresType pg_type;
+  ArrowError error;
+  ASSERT_EQ(PostgresType::FromSchema(resolver, schema.get(), &pg_type, &error),
+            NANOARROW_OK);
+  // NA defaults to kText
+  EXPECT_EQ(pg_type.type_id(), PostgresTypeId::kText);
+}
+
+// ---------------------------------------------------------------------------
+// PostgresType: accessor methods
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, FieldNameAccessor) {
+  PostgresType t = PostgresType(PostgresTypeId::kInt4).WithFieldName("my_field");
+  EXPECT_EQ(t.field_name(), "my_field");
+}
+
+TEST(PostgresTypeTest, ChildAccessors) {
+  PostgresType record(PostgresTypeId::kRecord);
+  record.AppendChild("a", PostgresType(PostgresTypeId::kInt4));
+  record.AppendChild("b", PostgresType(PostgresTypeId::kText));
+  record.AppendChild("c", PostgresType(PostgresTypeId::kBool));
+
+  EXPECT_EQ(record.n_children(), 3);
+  EXPECT_EQ(record.child(0).type_id(), PostgresTypeId::kInt4);
+  EXPECT_EQ(record.child(1).type_id(), PostgresTypeId::kText);
+  EXPECT_EQ(record.child(2).type_id(), PostgresTypeId::kBool);
+  EXPECT_EQ(record.child(0).field_name(), "a");
+}
+
+// ---------------------------------------------------------------------------
+// PostgresTypeResolver: duplicate OID
+// ---------------------------------------------------------------------------
+
+TEST(PostgresTypeTest, ResolverDuplicateOid) {
+  PostgresTypeResolver resolver;
+
+  // Insert int4 at OID 23
+  PostgresTypeResolver::Item item1 = {23, "int4", "int4recv", 0, 0, 0};
+  ArrowError error;
+  ASSERT_EQ(resolver.Insert(item1, &error), NANOARROW_OK);
+
+  // Insert text at same OID 23 — std::unordered_map::insert does NOT overwrite
+  PostgresTypeResolver::Item item2 = {23, "text", "textrecv", 0, 0, 0};
+  ASSERT_EQ(resolver.Insert(item2, &error), NANOARROW_OK);
+
+  PostgresType found;
+  ASSERT_EQ(resolver.Find(23, &found, &error), NANOARROW_OK);
+  // First insertion wins (no overwrite)
+  EXPECT_EQ(found.type_id(), PostgresTypeId::kInt4);
+}
+
 }  // namespace adbcpq

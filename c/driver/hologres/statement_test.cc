@@ -614,4 +614,188 @@ TEST_F(HologresStatementTest, ReleaseMultipleTimes) {
   TearDownError();
 }
 
+// ---------------------------------------------------------------------------
+// BuildJsonbWrapperQuery
+// ---------------------------------------------------------------------------
+
+// Simple PG-style identifier quoting for unit tests (equivalent to PQescapeIdentifier)
+static std::string TestQuoteIdentifier(const std::string& name) {
+  std::string result = "\"";
+  for (char c : name) {
+    if (c == '"') result += "\"\"";
+    else result += c;
+  }
+  result += "\"";
+  return result;
+}
+
+TEST(BuildJsonbWrapperQueryTest, NoJsonbColumns) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("id", adbcpq::PostgresType(adbcpq::PostgresTypeId::kInt4));
+  root.AppendChild("name", adbcpq::PostgresType(adbcpq::PostgresTypeId::kText));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(BuildJsonbWrapperQueryTest, SingleJsonbColumn) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("data", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"data\"::text AS \"data\" FROM (SELECT * FROM t) AS _adbc_jsonb_sub");
+}
+
+TEST(BuildJsonbWrapperQueryTest, MultipleJsonbColumns) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("meta", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+  root.AppendChild("config", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"meta\"::text AS \"meta\", \"config\"::text AS \"config\" "
+            "FROM (SELECT * FROM t) AS _adbc_jsonb_sub");
+}
+
+TEST(BuildJsonbWrapperQueryTest, MixedJsonbAndOtherTypes) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("id", adbcpq::PostgresType(adbcpq::PostgresTypeId::kInt4));
+  root.AppendChild("data", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+  root.AppendChild("name", adbcpq::PostgresType(adbcpq::PostgresTypeId::kText));
+  root.AppendChild("attrs", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+  root.AppendChild("score", adbcpq::PostgresType(adbcpq::PostgresTypeId::kFloat8));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"id\", \"data\"::text AS \"data\", \"name\", "
+            "\"attrs\"::text AS \"attrs\", \"score\" "
+            "FROM (SELECT * FROM t) AS _adbc_jsonb_sub");
+}
+
+TEST(BuildJsonbWrapperQueryTest, ColumnNameWithDoubleQuotes) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("my\"col", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"my\"\"col\"::text AS \"my\"\"col\" "
+            "FROM (SELECT * FROM t) AS _adbc_jsonb_sub");
+}
+
+TEST(BuildJsonbWrapperQueryTest, ColumnNameWithSpaces) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("my column", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"my column\"::text AS \"my column\" "
+            "FROM (SELECT * FROM t) AS _adbc_jsonb_sub");
+}
+
+TEST(BuildJsonbWrapperQueryTest, ComplexSubquery) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("data", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  std::string query = "SELECT data FROM t WHERE id > 10 ORDER BY id";
+  std::string result = BuildJsonbWrapperQuery(root, query, TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"data\"::text AS \"data\" "
+            "FROM (" + query + ") AS _adbc_jsonb_sub");
+}
+
+TEST(BuildJsonbWrapperQueryTest, EmptyRecordType) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  // No children at all
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT 1", TestQuoteIdentifier);
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(BuildJsonbWrapperQueryTest, JsonNotJsonb) {
+  // JSON (not JSONB) should NOT trigger wrapping
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("data", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJson));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(BuildJsonbWrapperQueryTest, QuoteFailureReturnsEmpty) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("data", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  // Simulate PQescapeIdentifier returning null (empty string from our wrapper)
+  auto failing_quote = [](const std::string&) -> std::string { return {}; };
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", failing_quote);
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(BuildJsonbWrapperQueryTest, QuoteFailureOnNonJsonbColumn) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("id", adbcpq::PostgresType(adbcpq::PostgresTypeId::kInt4));
+  root.AppendChild("data", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  // Quote fails for all columns
+  auto failing_quote = [](const std::string&) -> std::string { return {}; };
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", failing_quote);
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(BuildJsonbWrapperQueryTest, SingleNonJsonbColumn) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("id", adbcpq::PostgresType(adbcpq::PostgresTypeId::kInt4));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT id FROM t", TestQuoteIdentifier);
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(BuildJsonbWrapperQueryTest, AllSupportedNonJsonbTypes) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("a", adbcpq::PostgresType(adbcpq::PostgresTypeId::kBool));
+  root.AppendChild("b", adbcpq::PostgresType(adbcpq::PostgresTypeId::kInt2));
+  root.AppendChild("c", adbcpq::PostgresType(adbcpq::PostgresTypeId::kFloat4));
+  root.AppendChild("d", adbcpq::PostgresType(adbcpq::PostgresTypeId::kTimestamp));
+  root.AppendChild("e", adbcpq::PostgresType(adbcpq::PostgresTypeId::kDate));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(BuildJsonbWrapperQueryTest, JsonbAsLastColumn) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("id", adbcpq::PostgresType(adbcpq::PostgresTypeId::kInt4));
+  root.AppendChild("name", adbcpq::PostgresType(adbcpq::PostgresTypeId::kText));
+  root.AppendChild("meta", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"id\", \"name\", \"meta\"::text AS \"meta\" "
+            "FROM (SELECT * FROM t) AS _adbc_jsonb_sub");
+}
+
+TEST(BuildJsonbWrapperQueryTest, JsonbAsFirstColumn) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("meta", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+  root.AppendChild("id", adbcpq::PostgresType(adbcpq::PostgresTypeId::kInt4));
+  root.AppendChild("name", adbcpq::PostgresType(adbcpq::PostgresTypeId::kText));
+
+  std::string result = BuildJsonbWrapperQuery(root, "SELECT * FROM t", TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"meta\"::text AS \"meta\", \"id\", \"name\" "
+            "FROM (SELECT * FROM t) AS _adbc_jsonb_sub");
+}
+
+TEST(BuildJsonbWrapperQueryTest, QueryWithTrailingSemicolon) {
+  adbcpq::PostgresType root(adbcpq::PostgresTypeId::kRecord);
+  root.AppendChild("data", adbcpq::PostgresType(adbcpq::PostgresTypeId::kJsonb));
+
+  // The semicolon is part of the query — BuildJsonbWrapperQuery doesn't strip it
+  // (ExecuteCopy handles that separately)
+  std::string result =
+      BuildJsonbWrapperQuery(root, "SELECT * FROM t;", TestQuoteIdentifier);
+  EXPECT_EQ(result,
+            "SELECT \"data\"::text AS \"data\" "
+            "FROM (SELECT * FROM t;) AS _adbc_jsonb_sub");
+}
+
 }  // namespace adbchg
