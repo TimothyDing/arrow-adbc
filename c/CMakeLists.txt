@@ -101,6 +101,12 @@ if(ADBC_DRIVER_BIGQUERY)
   add_subdirectory(driver/bigquery)
 endif()
 
+if(ADBC_DRIVER_HOLOGRES)
+  install(FILES "${REPOSITORY_ROOT}/c/include/arrow-adbc/driver/hologres.h"
+          DESTINATION include/arrow-adbc/driver)
+  add_subdirectory(driver/hologres)
+endif()
+
 if(ADBC_INTEGRATION_DUCKDB)
   add_subdirectory(integration/duckdb)
 endif()
@@ -154,6 +160,10 @@ LIBRARY=$<TARGET_FILE:adbc_driver_${TARGET}_shared>" ${Python3_EXECUTABLE} -m pi
 
   if(ADBC_DRIVER_BIGQUERY)
     adbc_install_python_package(bigquery)
+  endif()
+
+  if(ADBC_DRIVER_HOLOGRES)
+    adbc_install_python_package(hologres)
   endif()
 endif()
 
