@@ -37,6 +37,7 @@ import org.apache.arrow.adbc.core.AdbcOptions;
 import org.apache.arrow.adbc.core.AdbcStatement;
 import org.apache.arrow.adbc.core.AdbcStatusCode;
 import org.apache.arrow.adbc.core.BulkIngestMode;
+import org.apache.arrow.adbc.core.IngestOption;
 import org.apache.arrow.adbc.core.TypedKey;
 import org.apache.arrow.adbc.driver.testsuite.ArrowToJava;
 import org.apache.arrow.memory.BufferAllocator;
@@ -275,6 +276,81 @@ class SqlServerIntegrationTest {
   }
 
   @Test
+  void bulkIngestTarget() throws Exception {
+    runSetup(
+        "DROP TABLE IF EXISTS secondary.foobar",
+        "DROP SCHEMA IF EXISTS secondary",
+        "CREATE SCHEMA secondary");
+
+    final Schema schema =
+        new Schema(
+            List.of(
+                Field.nullable("ndx", Types.MinorType.INT.getType()),
+                Field.nullable("value", Types.MinorType.VARCHAR.getType())));
+    try (VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, allocator)) {
+      IntVector iv = (IntVector) vsr.getVector(0);
+      VarCharVector vv = (VarCharVector) vsr.getVector(1);
+
+      try (AdbcStatement stmt =
+          conn.bulkIngest(
+              "foobar",
+              BulkIngestMode.REPLACE,
+              IngestOption.NOT_TEMPORARY,
+              IngestOption.targetNamespace("master", "secondary"))) {
+        iv.setSafe(0, 1);
+        iv.setSafe(1, 2);
+        vv.setNull(0);
+        vv.setSafe(1, "foobar".getBytes(StandardCharsets.UTF_8));
+        vsr.setRowCount(2);
+
+        stmt.bind(vsr);
+        assertThat(stmt.executeUpdate().getAffectedRows()).isEqualTo(2);
+      }
+    }
+
+    try (AdbcStatement stmt = conn.createStatement()) {
+      stmt.setSqlQuery("SELECT value FROM secondary.foobar ORDER BY ndx");
+      try (var result = stmt.executeQuery()) {
+        var values = ArrowToJava.toStrings(result.getReader(), "value");
+        assertThat(values).containsExactly(null, "foobar");
+      }
+    }
+  }
+
+  @Test
+  void bulkIngestTemporary() throws Exception {
+    final Schema schema =
+        new Schema(
+            List.of(
+                Field.nullable("ndx", Types.MinorType.INT.getType()),
+                Field.nullable("value", Types.MinorType.VARCHAR.getType())));
+    try (VectorSchemaRoot vsr = VectorSchemaRoot.create(schema, allocator)) {
+      IntVector iv = (IntVector) vsr.getVector(0);
+      VarCharVector vv = (VarCharVector) vsr.getVector(1);
+
+      try (AdbcStatement stmt =
+          conn.bulkIngest("foobar", BulkIngestMode.CREATE, IngestOption.TEMPORARY)) {
+        iv.setSafe(0, 1);
+        iv.setSafe(1, 2);
+        vv.setNull(0);
+        vv.setSafe(1, "foobar".getBytes(StandardCharsets.UTF_8));
+        vsr.setRowCount(2);
+
+        stmt.bind(vsr);
+        assertThat(stmt.executeUpdate().getAffectedRows()).isEqualTo(2);
+      }
+    }
+
+    try (AdbcStatement stmt = conn.createStatement()) {
+      stmt.setSqlQuery("SELECT value FROM #foobar ORDER BY ndx");
+      try (var result = stmt.executeQuery()) {
+        var values = ArrowToJava.toStrings(result.getReader(), "value");
+        assertThat(values).containsExactly(null, "foobar");
+      }
+    }
+  }
+
+  @Test
   void currentCatalogSchema() throws Exception {
     runSetup(
         "DROP TABLE IF EXISTS test_schema.foobar",
@@ -322,8 +398,43 @@ class SqlServerIntegrationTest {
         assertThat(result.getReader().loadNextBatch()).isTrue();
         assertThat(result.getReader().loadNextBatch()).isFalse();
       }
+
+      assertThat(stmt.getParameterSchema().getFields()).isEmpty();
     }
-    // TODO(https://github.com/apache/arrow-adbc/issues/4239): test get parameter schema
+
+    try (var stmt = conn.createStatement()) {
+      stmt.setSqlQuery("SELECT CONCAT(CAST(@p1 AS NVARCHAR), 'foo')");
+      assertSchema(stmt.getParameterSchema())
+          .isEqualTo(new Schema(List.of(Field.nullable("@p1", Types.MinorType.VARCHAR.getType()))));
+    }
+  }
+
+  @Test
+  void cancelQuery() throws Exception {
+    // There's nothing really we can test reliably (MSSQL driver doesn't react to cancel)
+    Schema schema = new Schema(List.of(Field.nullable("$1", Types.MinorType.VARCHAR.getType())));
+    try (var stmt = conn.createStatement();
+        var vsr = VectorSchemaRoot.create(schema, allocator)) {
+      var vcv = (VarCharVector) vsr.getVector(0);
+      vcv.setSafe(0, "test".getBytes(StandardCharsets.UTF_8));
+      vcv.setSafe(1, "bar".getBytes(StandardCharsets.UTF_8));
+
+      stmt.setSqlQuery("SELECT CAST(@p1 AS NVARCHAR) || 'foo'");
+      stmt.bind(vsr);
+
+      // N.B. the MSSQL driver doesn't appear to react
+      try (AdbcStatement.QueryResult result = stmt.executeQuery()) {
+        stmt.cancel();
+        //noinspection StatementWithEmptyBody
+        while (result.getReader().loadNextBatch()) {}
+      }
+    }
+  }
+
+  @Test
+  void cancelConnection() throws Exception {
+    // There's nothing really we can test reliably
+    conn.cancel();
   }
 
   @Test

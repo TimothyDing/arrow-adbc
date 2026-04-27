@@ -21,6 +21,7 @@ import org.apache.arrow.adbc.core.AdbcException;
 import org.apache.arrow.adbc.core.AdbcStatement;
 import org.apache.arrow.adbc.core.TypedKey;
 import org.apache.arrow.adbc.driver.jni.impl.JniLoader;
+import org.apache.arrow.adbc.driver.jni.impl.NativePartitionResult;
 import org.apache.arrow.adbc.driver.jni.impl.NativeQueryResult;
 import org.apache.arrow.adbc.driver.jni.impl.NativeStatementHandle;
 import org.apache.arrow.c.ArrowArray;
@@ -38,6 +39,11 @@ public class JniStatement implements AdbcStatement {
   public JniStatement(BufferAllocator allocator, NativeStatementHandle handle) {
     this.allocator = allocator;
     this.handle = handle;
+  }
+
+  @Override
+  public void cancel() throws AdbcException {
+    JniLoader.INSTANCE.statementCancel(handle);
   }
 
   @Override
@@ -68,6 +74,13 @@ public class JniStatement implements AdbcStatement {
   }
 
   @Override
+  public PartitionResult executePartitioned() throws AdbcException {
+    exportBind();
+    NativePartitionResult result = JniLoader.INSTANCE.statementExecutePartitions(handle);
+    return result.importResult(allocator);
+  }
+
+  @Override
   public QueryResult executeQuery() throws AdbcException {
     exportBind();
     NativeQueryResult result = JniLoader.INSTANCE.statementExecuteQuery(handle);
@@ -85,6 +98,11 @@ public class JniStatement implements AdbcStatement {
   public Schema executeSchema() throws AdbcException {
     exportBind();
     return JniLoader.INSTANCE.statementExecuteSchema(handle).importSchema(allocator);
+  }
+
+  @Override
+  public Schema getParameterSchema() throws AdbcException {
+    return JniLoader.INSTANCE.statementGetParameterSchema(handle).importSchema(allocator);
   }
 
   @Override
@@ -143,7 +161,7 @@ public class JniStatement implements AdbcStatement {
       JniLoader.INSTANCE.statementSetOptionDouble(handle, key.getKey(), (Double) value);
     } else if (value instanceof Boolean) {
       JniLoader.INSTANCE.statementSetOptionString(
-          handle, key.getKey(), ((Boolean) value) ? "true" : "false");
+          handle, key.getKey(), ((Boolean) value).toString());
     } else if (value instanceof byte[]) {
       JniLoader.INSTANCE.statementSetOptionBytes(handle, key.getKey(), (byte[]) value);
     } else {

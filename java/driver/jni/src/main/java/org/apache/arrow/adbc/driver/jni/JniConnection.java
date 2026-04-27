@@ -17,10 +17,12 @@
 
 package org.apache.arrow.adbc.driver.jni;
 
+import java.nio.ByteBuffer;
 import org.apache.arrow.adbc.core.AdbcConnection;
 import org.apache.arrow.adbc.core.AdbcException;
 import org.apache.arrow.adbc.core.AdbcStatement;
 import org.apache.arrow.adbc.core.BulkIngestMode;
+import org.apache.arrow.adbc.core.IngestOption;
 import org.apache.arrow.adbc.core.IsolationLevel;
 import org.apache.arrow.adbc.core.TypedKey;
 import org.apache.arrow.adbc.driver.jni.impl.JniLoader;
@@ -46,7 +48,23 @@ public class JniConnection implements AdbcConnection {
   }
 
   @Override
+  public void cancel() throws AdbcException {
+    JniLoader.INSTANCE.connectionCancel(handle);
+  }
+
+  @Override
   public AdbcStatement bulkIngest(String targetTableName, BulkIngestMode mode)
+      throws AdbcException {
+    return bulkIngestImpl(targetTableName, mode);
+  }
+
+  @Override
+  public AdbcStatement bulkIngest(
+      String targetTableName, BulkIngestMode mode, IngestOption... options) throws AdbcException {
+    return bulkIngestImpl(targetTableName, mode, options);
+  }
+
+  AdbcStatement bulkIngestImpl(String targetTableName, BulkIngestMode mode, IngestOption... options)
       throws AdbcException {
     NativeStatementHandle stmtHandle = JniLoader.INSTANCE.openStatement(handle);
     try {
@@ -71,6 +89,24 @@ public class JniConnection implements AdbcConnection {
       JniLoader.INSTANCE.statementSetOptionString(
           stmtHandle, "adbc.ingest.target_table", targetTableName);
       JniLoader.INSTANCE.statementSetOptionString(stmtHandle, "adbc.ingest.mode", modeValue);
+
+      for (var option : options) {
+        if (option instanceof IngestOption.TemporaryIngestOption) {
+          var o = (IngestOption.TemporaryIngestOption) option;
+          JniLoader.INSTANCE.statementSetOptionString(
+              stmtHandle, "adbc.ingest.temporary", Boolean.toString(o.isTemporary()));
+        } else if (option instanceof IngestOption.TargetNamespaceIngestOption) {
+          var o = (IngestOption.TargetNamespaceIngestOption) option;
+          if (o.getTargetCatalog() != null) {
+            JniLoader.INSTANCE.statementSetOptionString(
+                stmtHandle, "adbc.ingest.target_catalog", o.getTargetCatalog());
+          }
+          if (o.getTargetDbSchema() != null) {
+            JniLoader.INSTANCE.statementSetOptionString(
+                stmtHandle, "adbc.ingest.target_db_schema", o.getTargetDbSchema());
+          }
+        }
+      }
 
       return new JniStatement(allocator, stmtHandle);
     } catch (Exception e) {
@@ -217,6 +253,11 @@ public class JniConnection implements AdbcConnection {
   @Override
   public void setCurrentDbSchema(String dbSchema) throws AdbcException {
     setOption(JniDriver.CURRENT_DB_SCHEMA, dbSchema);
+  }
+
+  @Override
+  public ArrowReader readPartition(ByteBuffer descriptor) throws AdbcException {
+    return JniLoader.INSTANCE.connectionReadPartition(handle, descriptor).importStream(allocator);
   }
 
   @Override
